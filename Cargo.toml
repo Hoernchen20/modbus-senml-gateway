@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rumqttc = "0.25.1"
+rumqttc = { version = "0.25.1", default-features = false, features = ["use-rustls-no-provider"] }
+# Direct dep only to select the ring crypto provider for rumqttc's rustls
+# (its default pulls in aws-lc-rs, a heavy C/cmake build for musl targets).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2.2.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

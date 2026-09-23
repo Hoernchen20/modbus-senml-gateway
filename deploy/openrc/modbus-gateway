@@ -1,0 +1,43 @@
+#!/sbin/openrc-run
+# OpenRC service for the Modbus -> SenML/MQTT gateway.
+# Install to /etc/init.d/modbus-gateway (mode 0755); settings live in
+# /etc/conf.d/modbus-gateway.
+
+name="modbus-gateway"
+description="Modbus to SenML/MQTT gateway"
+
+: "${GATEWAY_BIN:=/usr/local/bin/modbus-senml-gateway}"
+: "${GATEWAY_CONFIG:=/etc/modbus-gateway/config.toml}"
+
+# supervise-daemon restarts the process if it ever exits unexpectedly
+# (panics inside a connection task are already contained in-process by the
+# supervisor; this covers anything that takes the whole process down).
+supervisor="supervise-daemon"
+respawn_delay="${respawn_delay:-5}"
+respawn_max="${respawn_max:-0}"
+
+command="$GATEWAY_BIN"
+command_args="$GATEWAY_CONFIG"
+command_user="${GATEWAY_USER:-root:root}"
+
+# The gateway drains queued MQTT sends for ~2s after SIGTERM; give it
+# comfortably longer before escalating.
+retry="TERM/10/KILL/5"
+
+# The MQTT password is read from the environment variable named by
+# `mqtt.password_env`; pass it via `supervise_daemon_args="--env ..."` in
+# conf.d (see the example there).
+
+depend() {
+	need net
+	# Not a hard dependency: the gateway retries /dev/log with backoff and
+	# logs to stderr until syslogd is up.
+	after logger
+}
+
+start_pre() {
+	if [ ! -r "$GATEWAY_CONFIG" ]; then
+		eerror "config file $GATEWAY_CONFIG not readable"
+		return 1
+	fi
+}

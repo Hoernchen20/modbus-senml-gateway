@@ -1,0 +1,21 @@
+# Settings for /etc/init.d/modbus-gateway.
+# Install to /etc/conf.d/modbus-gateway (mode 0600 — it holds the MQTT password).
+
+#GATEWAY_BIN="/usr/local/bin/modbus-senml-gateway"
+#GATEWAY_CONFIG="/etc/modbus-gateway/config.toml"
+
+# User[:group] to run as. For RTU connections the user needs access to the
+# serial device (usually group `dialout`), and it must be able to write
+# `gateway.status_file_path`.
+#GATEWAY_USER="modbus-gw:dialout"
+
+# MQTT password, exported under the name given by `mqtt.password_env`.
+supervise_daemon_args="--env MQTT_PASSWORD=changeme"
+
+# Restart behaviour if the whole process exits (0 = unlimited restarts).
+#respawn_delay=5
+#respawn_max=0
+
+# Where stderr goes. The gateway only writes there while /dev/log is
+# unavailable (e.g. syslogd not started yet); discarded if unset.
+#error_log="/var/log/modbus-gateway.err"

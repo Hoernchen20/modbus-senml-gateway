@@ -582,8 +582,10 @@ async fn run_publisher(mut rx: mpsc::Receiver<AggregatedBatch>, cfg: MqttConfig)
 ## 10. Deployment
 
 - Build: `aarch64-unknown-linux-musl` or `x86_64-unknown-linux-musl`,
-  `opt-level = "z"`, `lto = true`, `codegen-units = 1`, `panic = "abort"`,
-  stripped. Single static binary + OpenRC service script.
+  `opt-level = "z"`, `lto = true`, `codegen-units = 1`, stripped. Single
+  static binary + OpenRC service script (see `deploy/`). Default panic
+  unwinding is kept — `panic = "abort"` would defeat the §6.2 supervisor,
+  which catches a panicked connection task and respawns it.
 - **Serial port passthrough (RTU only)**: the LXC container needs the
   serial device node passed through (bind-mount or an `lxc.mount.entry`
   / cgroup device rule for `/dev/ttyUSB0` etc.). USB adapters can
