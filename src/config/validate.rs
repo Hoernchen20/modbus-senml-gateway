@@ -9,6 +9,9 @@ pub enum ValidationError {
     #[error("{field} must be greater than 0")]
     ZeroInterval { field: String },
 
+    #[error("mqtt.qos = {0} is not a valid QoS (allowed: 0, 1, 2)")]
+    InvalidQos(u8),
+
     #[error("connection '{connection}': duplicate unit_id {unit_id}")]
     DuplicateUnitId { connection: String, unit_id: u8 },
 
@@ -88,6 +91,10 @@ pub fn validate(config: &Config) -> Result<(), ValidationError> {
         return Err(ValidationError::ZeroInterval {
             field: "gateway.aggregation_window_secs".to_string(),
         });
+    }
+
+    if config.mqtt.qos > 2 {
+        return Err(ValidationError::InvalidQos(config.mqtt.qos));
     }
 
     let mut serial_ports: HashMap<String, String> = HashMap::new();
@@ -335,6 +342,16 @@ mod tests {
 
         let err = validate(&config).unwrap_err();
         assert!(matches!(err, ValidationError::ZeroInterval { .. }));
+    }
+
+    #[test]
+    fn invalid_qos_is_rejected() {
+        let mut config = valid_config();
+        config.mqtt.qos = 3;
+        assert!(matches!(
+            validate(&config),
+            Err(ValidationError::InvalidQos(3))
+        ));
     }
 
     #[test]

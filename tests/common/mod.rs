@@ -7,6 +7,7 @@
 
 #![allow(dead_code)]
 
+pub mod mqtt;
 pub mod rtu;
 
 use std::collections::HashMap;
