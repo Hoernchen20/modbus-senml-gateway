@@ -69,14 +69,22 @@ mod tests {
 
     #[test]
     fn u16_decodes_unsigned() {
-        let v = decode_one(WordOrder::BigEndian, &[65535], point(0, DataType::U16, 1.0, false));
+        let v = decode_one(
+            WordOrder::BigEndian,
+            &[65535],
+            point(0, DataType::U16, 1.0, false),
+        );
         assert_eq!(v, 65535.0);
     }
 
     #[test]
     fn i16_decodes_signed() {
         // 0xFFFF as i16 is -1.
-        let v = decode_one(WordOrder::BigEndian, &[0xFFFF], point(0, DataType::I16, 1.0, false));
+        let v = decode_one(
+            WordOrder::BigEndian,
+            &[0xFFFF],
+            point(0, DataType::I16, 1.0, false),
+        );
         assert_eq!(v, -1.0);
     }
 
@@ -127,7 +135,11 @@ mod tests {
 
     #[test]
     fn scale_multiplies_raw_value() {
-        let v = decode_one(WordOrder::BigEndian, &[1000], point(0, DataType::U16, 0.1, false));
+        let v = decode_one(
+            WordOrder::BigEndian,
+            &[1000],
+            point(0, DataType::U16, 0.1, false),
+        );
         assert!((v - 100.0).abs() < f64::EPSILON);
     }
 
@@ -154,7 +166,11 @@ mod tests {
     #[test]
     fn negative_scale_then_absolute_is_positive() {
         // scale flips the sign first, then .abs() is applied after.
-        let v = decode_one(WordOrder::BigEndian, &[100], point(0, DataType::U16, -1.0, true));
+        let v = decode_one(
+            WordOrder::BigEndian,
+            &[100],
+            point(0, DataType::U16, -1.0, true),
+        );
         assert_eq!(v, 100.0);
     }
 
@@ -168,6 +184,9 @@ mod tests {
             ],
         );
         let readings = decode(&block, &[10, 20]);
-        assert_eq!(readings, vec![("p".to_string(), 10.0), ("p".to_string(), 20.0)]);
+        assert_eq!(
+            readings,
+            vec![("p".to_string(), 10.0), ("p".to_string(), 20.0)]
+        );
     }
 }

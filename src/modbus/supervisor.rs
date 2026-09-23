@@ -127,7 +127,11 @@ mod tests {
         let good_ticks = Arc::new(AtomicUsize::new(0));
 
         let bad = tokio::spawn({
-            let task = flaky(usize::MAX, bad_spawns.clone(), Arc::new(AtomicUsize::new(0)));
+            let task = flaky(
+                usize::MAX,
+                bad_spawns.clone(),
+                Arc::new(AtomicUsize::new(0)),
+            );
             async move { supervise("bad", backoff(), task).await }
         });
         let good = tokio::spawn({

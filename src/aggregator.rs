@@ -180,9 +180,27 @@ mod tests {
     #[test]
     fn record_accumulates_sum_count_min_max() {
         let mut agg = HashMap::from([(point_id("d1", "p1"), PointAgg::new("V".to_string()))]);
-        record(&mut agg, Reading { point_id: point_id("d1", "p1"), value: 10.0 });
-        record(&mut agg, Reading { point_id: point_id("d1", "p1"), value: 20.0 });
-        record(&mut agg, Reading { point_id: point_id("d1", "p1"), value: 5.0 });
+        record(
+            &mut agg,
+            Reading {
+                point_id: point_id("d1", "p1"),
+                value: 10.0,
+            },
+        );
+        record(
+            &mut agg,
+            Reading {
+                point_id: point_id("d1", "p1"),
+                value: 20.0,
+            },
+        );
+        record(
+            &mut agg,
+            Reading {
+                point_id: point_id("d1", "p1"),
+                value: 5.0,
+            },
+        );
 
         let p = &agg[&point_id("d1", "p1")];
         assert_eq!(p.count, 3);
@@ -194,7 +212,13 @@ mod tests {
     #[test]
     fn readings_for_unknown_point_id_are_ignored() {
         let mut agg = HashMap::from([(point_id("d1", "p1"), PointAgg::new("V".to_string()))]);
-        record(&mut agg, Reading { point_id: point_id("d1", "unknown"), value: 10.0 });
+        record(
+            &mut agg,
+            Reading {
+                point_id: point_id("d1", "unknown"),
+                value: 10.0,
+            },
+        );
         assert_eq!(agg[&point_id("d1", "p1")].count, 0);
     }
 
@@ -205,7 +229,13 @@ mod tests {
             (point_id("d2", "p2"), PointAgg::new("A".to_string())),
         ]);
         // Only d1's point gets a sample; d2's point has zero samples.
-        record(&mut agg, Reading { point_id: point_id("d1", "p1"), value: 42.0 });
+        record(
+            &mut agg,
+            Reading {
+                point_id: point_id("d1", "p1"),
+                value: 42.0,
+            },
+        );
 
         let batches = flush(&mut agg, 0, 60);
 
@@ -218,8 +248,20 @@ mod tests {
     #[test]
     fn flush_computes_mean_and_resets_for_next_window() {
         let mut agg = HashMap::from([(point_id("d1", "p1"), PointAgg::new("V".to_string()))]);
-        record(&mut agg, Reading { point_id: point_id("d1", "p1"), value: 10.0 });
-        record(&mut agg, Reading { point_id: point_id("d1", "p1"), value: 20.0 });
+        record(
+            &mut agg,
+            Reading {
+                point_id: point_id("d1", "p1"),
+                value: 10.0,
+            },
+        );
+        record(
+            &mut agg,
+            Reading {
+                point_id: point_id("d1", "p1"),
+                value: 20.0,
+            },
+        );
 
         let batches = flush(&mut agg, 0, 60);
         assert_eq!(batches[0].points[0].mean, 15.0);
@@ -232,11 +274,29 @@ mod tests {
     #[test]
     fn concurrent_devices_do_not_cross_contaminate() {
         let mut agg = HashMap::from([
-            (point_id("d1", "temperature"), PointAgg::new("Cel".to_string())),
-            (point_id("d2", "temperature"), PointAgg::new("Cel".to_string())),
+            (
+                point_id("d1", "temperature"),
+                PointAgg::new("Cel".to_string()),
+            ),
+            (
+                point_id("d2", "temperature"),
+                PointAgg::new("Cel".to_string()),
+            ),
         ]);
-        record(&mut agg, Reading { point_id: point_id("d1", "temperature"), value: 21.0 });
-        record(&mut agg, Reading { point_id: point_id("d2", "temperature"), value: 99.0 });
+        record(
+            &mut agg,
+            Reading {
+                point_id: point_id("d1", "temperature"),
+                value: 21.0,
+            },
+        );
+        record(
+            &mut agg,
+            Reading {
+                point_id: point_id("d2", "temperature"),
+                value: 99.0,
+            },
+        );
 
         let batches = flush(&mut agg, 0, 60);
         let by_device: HashMap<_, _> = batches
@@ -269,7 +329,10 @@ mod tests {
         tokio::task::yield_now().await;
 
         reading_tx
-            .send(Reading { point_id: point_id("d1", "p1"), value: 1.0 })
+            .send(Reading {
+                point_id: point_id("d1", "p1"),
+                value: 1.0,
+            })
             .await
             .unwrap();
 
@@ -281,7 +344,10 @@ mod tests {
         // The second window needs a sample too — an empty window produces no
         // batch by design (§7), so without it `recv()` would wait forever.
         reading_tx
-            .send(Reading { point_id: point_id("d1", "p1"), value: 2.0 })
+            .send(Reading {
+                point_id: point_id("d1", "p1"),
+                value: 2.0,
+            })
             .await
             .unwrap();
 
