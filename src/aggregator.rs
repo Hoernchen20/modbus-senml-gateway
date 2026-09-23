@@ -72,27 +72,22 @@ pub async fn run_aggregator(
 ) {
     let window = Duration::from_secs(window_secs);
     let (wait, mut window_end_unix) = next_boundary(now_unix, window);
-    eprintln!("[agg] start now_unix={now_unix:?} wait={wait:?} window_end_unix={window_end_unix}");
 
     let mut deadline = time::Instant::now() + wait;
     let sleep = time::sleep_until(deadline);
     tokio::pin!(sleep);
 
     loop {
-        eprintln!("[agg] loop top, awaiting select");
         tokio::select! {
             maybe_reading = rx.recv() => {
-                eprintln!("[agg] recv branch: {maybe_reading:?}");
                 match maybe_reading {
                     Some(reading) => record(&mut agg, reading),
                     None => return,
                 }
             }
             _ = &mut sleep => {
-                eprintln!("[agg] sleep fired");
                 let window_start_unix = window_end_unix - window_secs;
                 for batch in flush(&mut agg, window_start_unix, window_end_unix) {
-                    eprintln!("[agg] sending batch {:?}..{:?}", batch.window_start, batch.window_end);
                     if publish_tx.send(batch).await.is_err() {
                         return;
                     }
@@ -102,7 +97,6 @@ pub async fn run_aggregator(
                 window_end_unix += window_secs;
                 deadline += window;
                 sleep.as_mut().reset(deadline);
-                eprintln!("[agg] rescheduled, new window_end_unix={window_end_unix}");
             }
         }
     }
@@ -259,6 +253,7 @@ mod tests {
         let (reading_tx, reading_rx) = mpsc::channel(16);
         let (publish_tx, mut publish_rx) = mpsc::channel(16);
         let agg = HashMap::from([(point_id("d1", "p1"), PointAgg::new("V".to_string()))]);
+        let start = time::Instant::now();
 
         tokio::spawn(run_aggregator(
             reading_rx,
@@ -283,11 +278,22 @@ mod tests {
         let first = publish_rx.recv().await.unwrap();
         assert_eq!((first.window_start, first.window_end), (0, 60));
 
+        // The second window needs a sample too — an empty window produces no
+        // batch by design (§7), so without it `recv()` would wait forever.
+        reading_tx
+            .send(Reading { point_id: point_id("d1", "p1"), value: 2.0 })
+            .await
+            .unwrap();
+
         // The next boundary must still be exactly 60s after the first —
         // not shifted by the 30s of lateness in the previous tick.
         time::advance(Duration::from_secs(30)).await;
         let second = publish_rx.recv().await.unwrap();
         assert_eq!((second.window_start, second.window_end), (60, 120));
+        // Labels come from a counter, so also check the tick itself fired at
+        // start+120s — a "now + window" reschedule would fire at 150s (the
+        // paused clock auto-advances to it) and fail here.
+        assert_eq!(time::Instant::now() - start, Duration::from_secs(120));
     }
 
     #[tokio::test(start_paused = true)]
