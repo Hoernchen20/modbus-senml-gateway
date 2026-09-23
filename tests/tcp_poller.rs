@@ -1,45 +1,13 @@
 mod common;
 
-use std::collections::HashMap;
 use std::time::Duration;
 
-use common::{register_value, MockTcpServer, ServerMode, UnitBehavior};
-use modbus_senml_gateway::config::schema::{
-    BlockConfig, ConnectionConfig, DataType, DeviceConfig, Function, PointConfig, Transport,
-    WordOrder,
+use common::{
+    by_point, collect_for, device, key, register_value, MockTcpServer, ServerMode, UnitBehavior,
 };
+use modbus_senml_gateway::config::schema::{ConnectionConfig, DeviceConfig, Transport};
 use modbus_senml_gateway::modbus::poller::run_connection;
-use modbus_senml_gateway::types::Reading;
 use tokio::sync::mpsc;
-
-fn block(function: Function, start: u16, point: &str) -> BlockConfig {
-    BlockConfig {
-        function,
-        start,
-        count: 1,
-        word_order: WordOrder::BigEndian,
-        points: vec![PointConfig {
-            name: point.to_string(),
-            offset: 0,
-            data_type: DataType::U16,
-            scale: 1.0,
-            absolute: false,
-            unit: "V".to_string(),
-        }],
-    }
-}
-
-/// Each device reads one holding and one input register.
-fn device(id: &str, unit_id: u8) -> DeviceConfig {
-    DeviceConfig {
-        id: id.to_string(),
-        unit_id,
-        blocks: vec![
-            block(Function::Holding, 10, "holding"),
-            block(Function::Input, 20, "input"),
-        ],
-    }
-}
 
 fn connection(server: &MockTcpServer, devices: Vec<DeviceConfig>) -> ConnectionConfig {
     ConnectionConfig {
@@ -56,27 +24,6 @@ fn connection(server: &MockTcpServer, devices: Vec<DeviceConfig>) -> ConnectionC
     }
 }
 
-async fn collect_for(rx: &mut mpsc::Receiver<Reading>, duration: Duration) -> Vec<Reading> {
-    let mut readings = Vec::new();
-    let deadline = tokio::time::Instant::now() + duration;
-    while let Ok(Some(r)) = tokio::time::timeout_at(deadline, rx.recv()).await {
-        readings.push(r);
-    }
-    readings
-}
-
-/// `(device, point) -> value` from the given readings; later readings win.
-fn by_point(readings: &[Reading]) -> HashMap<(String, String), f64> {
-    readings
-        .iter()
-        .map(|r| ((r.point_id.device.clone(), r.point_id.point.clone()), r.value))
-        .collect()
-}
-
-fn key(device: &str, point: &str) -> (String, String) {
-    (device.to_string(), point.to_string())
-}
-
 #[tokio::test]
 async fn multiple_devices_on_one_connection_are_polled_and_decoded() {
     let server = MockTcpServer::start().await;
@@ -91,10 +38,22 @@ async fn multiple_devices_on_one_connection_are_polled_and_decoded() {
     let values = by_point(&readings);
 
     assert_eq!(values.len(), 4, "got {readings:?}");
-    assert_eq!(values[&key("meter1", "holding")], register_value(1, 0x03, 10) as f64);
-    assert_eq!(values[&key("meter1", "input")], register_value(1, 0x04, 20) as f64);
-    assert_eq!(values[&key("meter2", "holding")], register_value(2, 0x03, 10) as f64);
-    assert_eq!(values[&key("meter2", "input")], register_value(2, 0x04, 20) as f64);
+    assert_eq!(
+        values[&key("meter1", "holding")],
+        register_value(1, 0x03, 10) as f64
+    );
+    assert_eq!(
+        values[&key("meter1", "input")],
+        register_value(1, 0x04, 20) as f64
+    );
+    assert_eq!(
+        values[&key("meter2", "holding")],
+        register_value(2, 0x03, 10) as f64
+    );
+    assert_eq!(
+        values[&key("meter2", "input")],
+        register_value(2, 0x04, 20) as f64
+    );
     assert_eq!(server.accepts().len(), 1);
 
     poller.abort();
@@ -113,9 +72,20 @@ async fn modbus_exception_skips_only_that_device_and_keeps_connection() {
     // Two ticks' worth.
     let readings = collect_for(&mut rx, Duration::from_millis(1500)).await;
 
-    assert!(readings.iter().all(|r| r.point_id.device == "meter2"), "got {readings:?}");
-    assert_eq!(readings.len(), 4, "meter2's two points on each of two ticks");
-    assert_eq!(server.accepts().len(), 1, "an exception must not trigger a reconnect");
+    assert!(
+        readings.iter().all(|r| r.point_id.device == "meter2"),
+        "got {readings:?}"
+    );
+    assert_eq!(
+        readings.len(),
+        4,
+        "meter2's two points on each of two ticks"
+    );
+    assert_eq!(
+        server.accepts().len(),
+        1,
+        "an exception must not trigger a reconnect"
+    );
 
     poller.abort();
 }
@@ -132,9 +102,20 @@ async fn unanswered_request_times_out_and_skips_only_that_device() {
 
     let readings = collect_for(&mut rx, Duration::from_millis(1500)).await;
 
-    assert!(readings.iter().all(|r| r.point_id.device == "meter2"), "got {readings:?}");
-    assert_eq!(readings.len(), 4, "meter2's two points on each of two ticks");
-    assert_eq!(server.accepts().len(), 1, "a timeout must not trigger a reconnect");
+    assert!(
+        readings.iter().all(|r| r.point_id.device == "meter2"),
+        "got {readings:?}"
+    );
+    assert_eq!(
+        readings.len(),
+        4,
+        "meter2's two points on each of two ticks"
+    );
+    assert_eq!(
+        server.accepts().len(),
+        1,
+        "a timeout must not trigger a reconnect"
+    );
 
     poller.abort();
 }
@@ -144,16 +125,25 @@ async fn socket_close_reconnects_with_capped_backoff_that_resets_after_success()
     let server = MockTcpServer::start().await;
     server.set_mode(ServerMode::CloseOnRequest);
     let (tx, mut rx) = mpsc::channel(64);
-    let poller = tokio::spawn(run_connection(connection(&server, vec![device("meter1", 1)]), tx));
+    let poller = tokio::spawn(run_connection(
+        connection(&server, vec![device("meter1", 1)]),
+        tx,
+    ));
 
     // Backoff min 1s, max 2s: reconnect gaps should run 1s, 2s, 2s.
     while server.accepts().len() < 4 {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let accepts = server.accepts();
-    let gaps: Vec<f64> = accepts.windows(2).map(|w| (w[1] - w[0]).as_secs_f64()).collect();
+    let gaps: Vec<f64> = accepts
+        .windows(2)
+        .map(|w| (w[1] - w[0]).as_secs_f64())
+        .collect();
     for (gap, expected) in gaps.iter().zip([1.0, 2.0, 2.0]) {
-        assert!((gap - expected).abs() < 0.3, "reconnect gaps {gaps:?}, expected ~[1, 2, 2]");
+        assert!(
+            (gap - expected).abs() < 0.3,
+            "reconnect gaps {gaps:?}, expected ~[1, 2, 2]"
+        );
     }
 
     // Let the server answer again: polling resumes on the next reconnect.
@@ -177,7 +167,10 @@ async fn socket_close_reconnects_with_capped_backoff_that_resets_after_success()
     let close = server.closes()[closes_before];
     let accept = server.accepts()[accepts_before];
     let gap = (accept - close).as_secs_f64();
-    assert!((gap - 1.0).abs() < 0.3, "post-success reconnect gap {gap}, expected ~1s");
+    assert!(
+        (gap - 1.0).abs() < 0.3,
+        "post-success reconnect gap {gap}, expected ~1s"
+    );
 
     poller.abort();
 }

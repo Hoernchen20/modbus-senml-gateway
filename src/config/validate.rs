@@ -21,6 +21,14 @@ pub enum ValidationError {
         second: String,
     },
 
+    #[error("connection '{connection}': {field} = {value} is not supported (allowed: {allowed})")]
+    UnsupportedSerialSetting {
+        connection: String,
+        field: &'static str,
+        value: u8,
+        allowed: &'static str,
+    },
+
     #[error(
         "connection '{connection}' device '{device}' block at {start}: count ({count}) exceeds the 125-register Modbus read limit per request"
     )]
@@ -101,7 +109,29 @@ pub fn validate(config: &Config) -> Result<(), ValidationError> {
             }
         }
 
-        if let Transport::Rtu { serial_port, .. } = &conn.transport {
+        if let Transport::Rtu {
+            serial_port,
+            data_bits,
+            stop_bits,
+            ..
+        } = &conn.transport
+        {
+            if !(5..=8).contains(data_bits) {
+                return Err(ValidationError::UnsupportedSerialSetting {
+                    connection: conn.id.clone(),
+                    field: "data_bits",
+                    value: *data_bits,
+                    allowed: "5, 6, 7, 8",
+                });
+            }
+            if !(1..=2).contains(stop_bits) {
+                return Err(ValidationError::UnsupportedSerialSetting {
+                    connection: conn.id.clone(),
+                    field: "stop_bits",
+                    value: *stop_bits,
+                    allowed: "1, 2",
+                });
+            }
             if let Some(first) = serial_ports.get(serial_port) {
                 return Err(ValidationError::DuplicateSerialPort {
                     serial_port: serial_port.clone(),
@@ -277,7 +307,11 @@ mod tests {
     }
 
     fn valid_ca_cert_path() -> String {
-        concat!(env!("CARGO_MANIFEST_DIR"), "/src/config/testdata/valid_ca.pem").to_string()
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/config/testdata/valid_ca.pem"
+        )
+        .to_string()
     }
 
     #[test]
@@ -337,6 +371,31 @@ mod tests {
 
         let err = validate(&config).unwrap_err();
         assert!(matches!(err, ValidationError::DuplicateSerialPort { .. }));
+    }
+
+    #[test]
+    fn unsupported_data_bits_or_stop_bits_are_rejected() {
+        let rtu = |data_bits, stop_bits| {
+            let mut config = valid_config();
+            config.connections[0].transport = Transport::Rtu {
+                serial_port: "/dev/ttyUSB0".to_string(),
+                baud_rate: 9600,
+                data_bits,
+                parity: Parity::None,
+                stop_bits,
+                inter_frame_delay_ms: 0,
+            };
+            config
+        };
+
+        assert!(validate(&rtu(8, 2)).is_ok());
+        for (data_bits, stop_bits) in [(9, 1), (4, 1), (8, 0), (8, 3)] {
+            let err = validate(&rtu(data_bits, stop_bits)).unwrap_err();
+            assert!(
+                matches!(err, ValidationError::UnsupportedSerialSetting { .. }),
+                "data_bits={data_bits} stop_bits={stop_bits}: {err}"
+            );
+        }
     }
 
     #[test]

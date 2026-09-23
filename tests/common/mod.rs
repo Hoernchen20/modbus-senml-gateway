@@ -2,17 +2,80 @@
 //!
 //! The mock Modbus/TCP server is hand-rolled over MBAP framing rather than
 //! built on tokio-modbus's server so tests can script per-unit behaviour
-//! (exceptions, silence) and drop the socket on demand.
+//! (exceptions, silence) and drop the socket on demand. The RTU counterpart,
+//! a responder on a PTY master, lives in [`rtu`].
 
 #![allow(dead_code)]
+
+pub mod rtu;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use modbus_senml_gateway::config::schema::{
+    BlockConfig, DataType, DeviceConfig, Function, PointConfig, WordOrder,
+};
+use modbus_senml_gateway::types::Reading;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
+
+pub fn block(function: Function, start: u16, point: &str) -> BlockConfig {
+    BlockConfig {
+        function,
+        start,
+        count: 1,
+        word_order: WordOrder::BigEndian,
+        points: vec![PointConfig {
+            name: point.to_string(),
+            offset: 0,
+            data_type: DataType::U16,
+            scale: 1.0,
+            absolute: false,
+            unit: "V".to_string(),
+        }],
+    }
+}
+
+/// Each device reads one holding and one input register.
+pub fn device(id: &str, unit_id: u8) -> DeviceConfig {
+    DeviceConfig {
+        id: id.to_string(),
+        unit_id,
+        blocks: vec![
+            block(Function::Holding, 10, "holding"),
+            block(Function::Input, 20, "input"),
+        ],
+    }
+}
+
+pub async fn collect_for(rx: &mut mpsc::Receiver<Reading>, duration: Duration) -> Vec<Reading> {
+    let mut readings = Vec::new();
+    let deadline = tokio::time::Instant::now() + duration;
+    while let Ok(Some(r)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        readings.push(r);
+    }
+    readings
+}
+
+/// `(device, point) -> value` from the given readings; later readings win.
+pub fn by_point(readings: &[Reading]) -> HashMap<(String, String), f64> {
+    readings
+        .iter()
+        .map(|r| {
+            (
+                (r.point_id.device.clone(), r.point_id.point.clone()),
+                r.value,
+            )
+        })
+        .collect()
+}
+
+pub fn key(device: &str, point: &str) -> (String, String) {
+    (device.to_string(), point.to_string())
+}
 
 /// How the server answers requests for a given unit id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,7 +170,11 @@ async fn serve_connection(mut stream: TcpStream, state: Arc<Mutex<State>>) {
             let state = state.lock().unwrap();
             (
                 state.mode.unwrap_or(ServerMode::Normal),
-                state.units.get(&unit).copied().unwrap_or(UnitBehavior::Respond),
+                state
+                    .units
+                    .get(&unit)
+                    .copied()
+                    .unwrap_or(UnitBehavior::Respond),
             )
         };
 

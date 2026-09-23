@@ -8,7 +8,7 @@ use tokio_modbus::prelude::SlaveContext;
 use tokio_modbus::{ExceptionCode, Slave};
 use tracing::{info, warn};
 
-use crate::config::schema::{BlockConfig, ConnectionConfig, Function, Transport};
+use crate::config::schema::{BlockConfig, ConnectionConfig, Function, Parity, Transport};
 use crate::modbus::decode::decode;
 use crate::types::{PointId, Reading};
 
@@ -80,11 +80,57 @@ async fn connect(transport: &Transport, timeout: Duration) -> io::Result<Context
                 .await
                 .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "connect timed out"))?
         }
-        // M5.
-        Transport::Rtu { .. } => Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "RTU transport not yet implemented",
+        Transport::Rtu {
+            serial_port,
+            baud_rate,
+            data_bits,
+            parity,
+            stop_bits,
+            ..
+        } => {
+            let builder = tokio_serial::new(serial_port, *baud_rate)
+                .data_bits(serial_data_bits(*data_bits)?)
+                .parity(serial_parity(*parity))
+                .stop_bits(serial_stop_bits(*stop_bits)?);
+            // Opened exclusively (serialport's default): a second opener of the
+            // same bus would interleave frames with ours.
+            let stream = tokio_serial::SerialStream::open(&builder)?;
+            Ok(client::rtu::attach(stream))
+        }
+    }
+}
+
+// Config validation already restricts these to supported values; the errors
+// are only a fallback so an unvalidated config can't panic the poller.
+fn serial_data_bits(bits: u8) -> io::Result<tokio_serial::DataBits> {
+    match bits {
+        5 => Ok(tokio_serial::DataBits::Five),
+        6 => Ok(tokio_serial::DataBits::Six),
+        7 => Ok(tokio_serial::DataBits::Seven),
+        8 => Ok(tokio_serial::DataBits::Eight),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unsupported data_bits {bits}"),
         )),
+    }
+}
+
+fn serial_stop_bits(bits: u8) -> io::Result<tokio_serial::StopBits> {
+    match bits {
+        1 => Ok(tokio_serial::StopBits::One),
+        2 => Ok(tokio_serial::StopBits::Two),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("unsupported stop_bits {bits}"),
+        )),
+    }
+}
+
+fn serial_parity(parity: Parity) -> tokio_serial::Parity {
+    match parity {
+        Parity::None => tokio_serial::Parity::None,
+        Parity::Even => tokio_serial::Parity::Even,
+        Parity::Odd => tokio_serial::Parity::Odd,
     }
 }
 
