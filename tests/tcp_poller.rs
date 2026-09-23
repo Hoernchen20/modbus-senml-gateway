@@ -7,6 +7,7 @@ use common::{
 };
 use modbus_senml_gateway::config::schema::{ConnectionConfig, DeviceConfig, Transport};
 use modbus_senml_gateway::modbus::poller::run_connection;
+use modbus_senml_gateway::status::{StatusEvent, StatusReporter, STATUS_CHANNEL_CAPACITY};
 use tokio::sync::mpsc;
 
 fn connection(server: &MockTcpServer, devices: Vec<DeviceConfig>) -> ConnectionConfig {
@@ -24,13 +25,39 @@ fn connection(server: &MockTcpServer, devices: Vec<DeviceConfig>) -> ConnectionC
     }
 }
 
+fn status_channel() -> (StatusReporter, mpsc::Receiver<StatusEvent>) {
+    let (tx, rx) = mpsc::channel(STATUS_CHANNEL_CAPACITY);
+    (StatusReporter::new(tx), rx)
+}
+
+fn drain(rx: &mut mpsc::Receiver<StatusEvent>) -> Vec<StatusEvent> {
+    std::iter::from_fn(|| rx.try_recv().ok()).collect()
+}
+
+fn device_ok(device: &str) -> StatusEvent {
+    StatusEvent::DeviceOk {
+        connection_id: "tcp-test".to_string(),
+        device_id: device.to_string(),
+    }
+}
+
+fn device_problem(device: &str, reason: &str) -> StatusEvent {
+    StatusEvent::DeviceProblem {
+        connection_id: "tcp-test".to_string(),
+        device_id: device.to_string(),
+        reason: reason.to_string(),
+    }
+}
+
 #[tokio::test]
 async fn multiple_devices_on_one_connection_are_polled_and_decoded() {
     let server = MockTcpServer::start().await;
     let (tx, mut rx) = mpsc::channel(64);
+    let (status, mut status_rx) = status_channel();
     let poller = tokio::spawn(run_connection(
         connection(&server, vec![device("meter1", 1), device("meter2", 2)]),
         tx,
+        status,
     ));
 
     // First tick fires immediately after connect.
@@ -55,6 +82,16 @@ async fn multiple_devices_on_one_connection_are_polled_and_decoded() {
         register_value(2, 0x04, 20) as f64
     );
     assert_eq!(server.accepts().len(), 1);
+    assert_eq!(
+        drain(&mut status_rx),
+        [
+            StatusEvent::ConnectionUp {
+                connection_id: "tcp-test".to_string()
+            },
+            device_ok("meter1"),
+            device_ok("meter2"),
+        ]
+    );
 
     poller.abort();
 }
@@ -64,9 +101,11 @@ async fn modbus_exception_skips_only_that_device_and_keeps_connection() {
     let server = MockTcpServer::start().await;
     server.set_unit(1, UnitBehavior::Exception(0x02)); // illegal data address
     let (tx, mut rx) = mpsc::channel(64);
+    let (status, mut status_rx) = status_channel();
     let poller = tokio::spawn(run_connection(
         connection(&server, vec![device("meter1", 1), device("meter2", 2)]),
         tx,
+        status,
     ));
 
     // Two ticks' worth.
@@ -86,6 +125,15 @@ async fn modbus_exception_skips_only_that_device_and_keeps_connection() {
         1,
         "an exception must not trigger a reconnect"
     );
+    let events = drain(&mut status_rx);
+    assert!(
+        events.contains(&device_problem("meter1", "exception: Illegal data address")),
+        "{events:?}"
+    );
+    assert!(events.contains(&device_ok("meter2")), "{events:?}");
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, StatusEvent::ConnectionDown { .. })));
 
     poller.abort();
 }
@@ -95,9 +143,11 @@ async fn unanswered_request_times_out_and_skips_only_that_device() {
     let server = MockTcpServer::start().await;
     server.set_unit(1, UnitBehavior::Silent);
     let (tx, mut rx) = mpsc::channel(64);
+    let (status, mut status_rx) = status_channel();
     let poller = tokio::spawn(run_connection(
         connection(&server, vec![device("meter1", 1), device("meter2", 2)]),
         tx,
+        status,
     ));
 
     let readings = collect_for(&mut rx, Duration::from_millis(1500)).await;
@@ -116,6 +166,12 @@ async fn unanswered_request_times_out_and_skips_only_that_device() {
         1,
         "a timeout must not trigger a reconnect"
     );
+    let events = drain(&mut status_rx);
+    assert!(
+        events.contains(&device_problem("meter1", "timeout")),
+        "{events:?}"
+    );
+    assert!(events.contains(&device_ok("meter2")), "{events:?}");
 
     poller.abort();
 }
@@ -125,9 +181,11 @@ async fn socket_close_reconnects_with_capped_backoff_that_resets_after_success()
     let server = MockTcpServer::start().await;
     server.set_mode(ServerMode::CloseOnRequest);
     let (tx, mut rx) = mpsc::channel(64);
+    let (status, mut status_rx) = status_channel();
     let poller = tokio::spawn(run_connection(
         connection(&server, vec![device("meter1", 1)]),
         tx,
+        status,
     ));
 
     // Backoff min 1s, max 2s: reconnect gaps should run 1s, 2s, 2s.
@@ -153,6 +211,11 @@ async fn socket_close_reconnects_with_capped_backoff_that_resets_after_success()
         .expect("polling should resume after reconnect")
         .unwrap();
     assert_eq!(reading.point_id.device, "meter1");
+    let events = drain(&mut status_rx);
+    let down = StatusEvent::ConnectionDown {
+        connection_id: "tcp-test".to_string(),
+    };
+    assert!(events.contains(&down), "{events:?}");
 
     // The successful read reset the backoff: the next drop reconnects after
     // ~1s (min), not the 2s cap it had reached.
@@ -196,11 +259,18 @@ async fn connection_refused_is_retried() {
     };
     cfg.devices[0].blocks.truncate(1);
     let (tx, _rx) = mpsc::channel(64);
-    let poller = tokio::spawn(run_connection(cfg, tx));
+    let (status, mut status_rx) = status_channel();
+    let poller = tokio::spawn(run_connection(cfg, tx, status));
 
     // Start listening on that port after the first failed attempt; the
     // poller must pick it up on a retry.
     tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        drain(&mut status_rx),
+        [StatusEvent::ConnectionDown {
+            connection_id: "refused".to_string()
+        }]
+    );
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     let (stream, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
         .await

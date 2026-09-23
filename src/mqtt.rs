@@ -11,6 +11,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::schema::{GatewayConfig, MqttConfig};
 use crate::senml::encode_senml;
+use crate::status::{StatusEvent, StatusReporter};
 use crate::types::AggregatedBatch;
 
 /// Capacity of rumqttc's request queue (§9): at one publish per device per
@@ -108,12 +109,14 @@ pub fn build_mqtt_options(
 /// disconnects and returns once the DISCONNECT is on the wire. Queued
 /// batches ahead of it are written first; if the broker is unreachable
 /// this never returns, so shutdown must bound it with a timeout. Dropping
-/// the future stops the eventloop task too.
+/// the future stops the eventloop task too. Broker connectivity goes to
+/// `status` (§11.2).
 pub async fn run_publisher(
     mut rx: mpsc::Receiver<AggregatedBatch>,
     options: MqttOptions,
     mqtt: MqttConfig,
     gateway: GatewayConfig,
+    status: StatusReporter,
 ) -> Result<(), MqttSetupError> {
     let qos = qos(mqtt.qos)?;
     let status_topic = status_topic(&gateway.id);
@@ -123,6 +126,7 @@ pub async fn run_publisher(
         eventloop,
         client.clone(),
         status_topic.clone(),
+        status,
     ));
     let _guard = AbortOnDrop(eventloop_task.abort_handle());
 
@@ -158,7 +162,12 @@ pub async fn run_publisher(
 
 /// The only thing driving rumqttc's reconnects, keep-alives and acks (§9).
 /// Returns once a requested DISCONNECT has been sent.
-async fn drive_eventloop(mut eventloop: EventLoop, client: AsyncClient, status_topic: String) {
+async fn drive_eventloop(
+    mut eventloop: EventLoop,
+    client: AsyncClient,
+    status_topic: String,
+    status: StatusReporter,
+) {
     // Warn once per outage (including a broker that's unreachable at
     // startup), not on every 500ms retry while it stays away.
     let mut outage_logged = false;
@@ -167,6 +176,7 @@ async fn drive_eventloop(mut eventloop: EventLoop, client: AsyncClient, status_t
             Ok(Event::Incoming(Packet::ConnAck(ack))) => {
                 outage_logged = false;
                 info!(session_present = ack.session_present, "mqtt connected");
+                status.report(StatusEvent::MqttConnected);
                 // Re-assert "online" on every connect: an unclean drop since
                 // the last one will have fired the "offline" LWT. Spawned
                 // because this loop is what drains the request queue, so
@@ -181,10 +191,14 @@ async fn drive_eventloop(mut eventloop: EventLoop, client: AsyncClient, status_t
             }
             Ok(Event::Outgoing(Outgoing::Disconnect)) => {
                 info!("mqtt disconnected");
+                status.report(StatusEvent::MqttDisconnected);
                 return;
             }
             Ok(_) => {}
             Err(e) => {
+                // Every failed attempt, not once per outage: the status
+                // writer dedups, and a dropped event can't stick.
+                status.report(StatusEvent::MqttDisconnected);
                 if outage_logged {
                     debug!(error = %e, "mqtt reconnect attempt failed");
                 } else {

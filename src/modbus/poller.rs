@@ -10,6 +10,7 @@ use tracing::{info, warn};
 
 use crate::config::schema::{BlockConfig, ConnectionConfig, Function, Parity, Transport};
 use crate::modbus::decode::decode;
+use crate::status::{StatusEvent, StatusReporter};
 use crate::types::{PointId, Reading};
 
 /// Exponential reconnect backoff, doubling from `min` up to `max`.
@@ -161,8 +162,13 @@ fn inter_frame_delay(transport: &Transport) -> Option<Duration> {
 }
 
 /// One task per `[[connection]]` (§6). Returns only once the aggregator side
-/// of `tx` is closed; otherwise reconnects forever.
-pub async fn run_connection(cfg: ConnectionConfig, tx: mpsc::Sender<Reading>) {
+/// of `tx` is closed; otherwise reconnects forever. Connection state and
+/// every device's result on every tick go to `status` (§11.2).
+pub async fn run_connection(
+    cfg: ConnectionConfig,
+    tx: mpsc::Sender<Reading>,
+    status: StatusReporter,
+) {
     let io_timeout = Duration::from_millis(cfg.io_timeout_ms);
     let poll_interval = Duration::from_secs(cfg.poll_interval_secs);
     let frame_delay = inter_frame_delay(&cfg.transport);
@@ -175,10 +181,16 @@ pub async fn run_connection(cfg: ConnectionConfig, tx: mpsc::Sender<Reading>) {
         let mut ctx = match connect(&cfg.transport, io_timeout).await {
             Ok(ctx) => {
                 info!(connection = %cfg.id, "connected");
+                status.report(StatusEvent::ConnectionUp {
+                    connection_id: cfg.id.clone(),
+                });
                 ctx
             }
             Err(e) => {
                 warn!(error = %e, connection = %cfg.id, retry_in = ?backoff.current(), "connect failed");
+                status.report(StatusEvent::ConnectionDown {
+                    connection_id: cfg.id.clone(),
+                });
                 backoff.wait().await;
                 continue;
             }
@@ -193,6 +205,7 @@ pub async fn run_connection(cfg: ConnectionConfig, tx: mpsc::Sender<Reading>) {
             ticker.tick().await;
             for device in &cfg.devices {
                 ctx.set_slave(Slave(device.unit_id));
+                let mut problem = None;
                 for block in &device.blocks {
                     let result = read_block(&mut ctx, block, io_timeout).await;
                     if let Some(delay) = frame_delay {
@@ -223,22 +236,43 @@ pub async fn run_connection(cfg: ConnectionConfig, tx: mpsc::Sender<Reading>) {
                         }
                         BlockResult::Exception(code) => {
                             warn!(?code, connection = %cfg.id, device = %device.id, "modbus exception, skipping device this tick");
+                            problem = Some(format!("exception: {code}"));
                             break;
                         }
                         BlockResult::Protocol(e) => {
                             warn!(error = %e, connection = %cfg.id, device = %device.id, "protocol error, skipping device this tick");
+                            problem = Some("protocol error".to_string());
                             break;
                         }
                         BlockResult::Timeout => {
                             warn!(connection = %cfg.id, device = %device.id, "io timeout, skipping device this tick");
+                            problem = Some("timeout".to_string());
                             break;
                         }
                         BlockResult::TransportFatal(e) => {
                             warn!(error = %e, connection = %cfg.id, retry_in = ?backoff.current(), "transport error, reconnecting");
+                            status.report(StatusEvent::ConnectionDown {
+                                connection_id: cfg.id.clone(),
+                            });
                             break 'poll;
                         }
                     }
                 }
+                // Reported every tick, not just on change, so an event dropped
+                // on a full status channel is corrected by the next one.
+                let connection_id = cfg.id.clone();
+                let device_id = device.id.clone();
+                status.report(match problem {
+                    None => StatusEvent::DeviceOk {
+                        connection_id,
+                        device_id,
+                    },
+                    Some(reason) => StatusEvent::DeviceProblem {
+                        connection_id,
+                        device_id,
+                        reason,
+                    },
+                });
             }
         }
 

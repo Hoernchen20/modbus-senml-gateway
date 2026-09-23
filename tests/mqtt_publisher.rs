@@ -12,6 +12,7 @@ use common::mqtt::{
 use modbus_senml_gateway::config::schema::{GatewayConfig, MqttConfig};
 use modbus_senml_gateway::mqtt::{build_mqtt_options, run_publisher};
 use modbus_senml_gateway::senml::encode_senml;
+use modbus_senml_gateway::status::{StatusEvent, StatusReporter, STATUS_CHANNEL_CAPACITY};
 use modbus_senml_gateway::types::{AggregatedBatch, AggregatedPoint};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -73,6 +74,17 @@ struct Harness {
     broker: TestBroker,
     tx: mpsc::Sender<AggregatedBatch>,
     publisher: JoinHandle<()>,
+    status: mpsc::Receiver<StatusEvent>,
+}
+
+impl Harness {
+    async fn expect_status(&mut self, expected: StatusEvent) {
+        let got = tokio::time::timeout(TIMEOUT, self.status.recv())
+            .await
+            .expect("no status event")
+            .unwrap();
+        assert_eq!(got, expected);
+    }
 }
 
 /// Starts a publisher connected to `port`: the broker's TLS port directly,
@@ -81,8 +93,10 @@ async fn start(certs: &TestCerts, broker: TestBroker, port: u16) -> Harness {
     let mqtt = mqtt_config(certs, port);
     let options = build_mqtt_options(&mqtt, GATEWAY_ID, PASSWORD.to_string()).unwrap();
     let (tx, rx) = mpsc::channel(16);
+    let (status_tx, status) = mpsc::channel(STATUS_CHANNEL_CAPACITY);
+    let reporter = StatusReporter::new(status_tx);
     let publisher = tokio::spawn(async move {
-        run_publisher(rx, options, mqtt, gateway_config())
+        run_publisher(rx, options, mqtt, gateway_config(), reporter)
             .await
             .unwrap();
     });
@@ -90,6 +104,7 @@ async fn start(certs: &TestCerts, broker: TestBroker, port: u16) -> Harness {
         broker,
         tx,
         publisher,
+        status,
     }
 }
 
@@ -134,8 +149,9 @@ async fn unclean_drop_fires_retained_offline_will_then_online_on_reconnect() {
     let broker = start_broker(&certs);
     let proxy = Proxy::start(broker.tls_port).await;
     let mut observer = Observer::start(&broker).await;
-    let h = start(&certs, broker, proxy.port).await;
+    let mut h = start(&certs, broker, proxy.port).await;
     assert_eq!(observer.expect(STATUS, TIMEOUT).await.payload, b"online");
+    h.expect_status(StatusEvent::MqttConnected).await;
 
     // Keep the gateway away so its reconnect can't overwrite the will.
     proxy.refuse(true);
@@ -147,9 +163,21 @@ async fn unclean_drop_fires_retained_offline_will_then_online_on_reconnect() {
     let retained = late.expect(STATUS, TIMEOUT).await;
     assert_eq!(retained.payload, b"offline");
     assert!(retained.retain);
+    h.expect_status(StatusEvent::MqttDisconnected).await;
 
     proxy.refuse(false);
     assert_eq!(observer.expect(STATUS, TIMEOUT).await.payload, b"online");
+    // Skip the repeated per-attempt disconnect reports from the outage.
+    loop {
+        let event = tokio::time::timeout(TIMEOUT, h.status.recv())
+            .await
+            .expect("no MqttConnected after reconnect")
+            .unwrap();
+        if event == StatusEvent::MqttConnected {
+            break;
+        }
+        assert_eq!(event, StatusEvent::MqttDisconnected);
+    }
 }
 
 #[tokio::test]
@@ -189,6 +217,7 @@ async fn closing_input_publishes_offline_and_returns() {
         broker,
         tx,
         publisher,
+        mut status,
     } = start(&certs, broker, port).await;
     observer.expect(STATUS, TIMEOUT).await;
 
@@ -210,4 +239,10 @@ async fn closing_input_publishes_offline_and_returns() {
     let retained = late.expect(STATUS, TIMEOUT).await;
     assert_eq!(retained.payload, b"offline");
     assert!(retained.retain);
+
+    let events: Vec<_> = std::iter::from_fn(|| status.try_recv().ok()).collect();
+    assert_eq!(
+        events,
+        [StatusEvent::MqttConnected, StatusEvent::MqttDisconnected]
+    );
 }

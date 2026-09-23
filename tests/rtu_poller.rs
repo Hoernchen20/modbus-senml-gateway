@@ -6,6 +6,7 @@ use common::rtu::{BusEvent, MockRtuBus};
 use common::{by_point, collect_for, device, key, register_value, UnitBehavior};
 use modbus_senml_gateway::config::schema::{ConnectionConfig, DeviceConfig, Parity, Transport};
 use modbus_senml_gateway::modbus::poller::{is_transport_fatal, run_connection};
+use modbus_senml_gateway::status::StatusReporter;
 use tokio::sync::mpsc;
 use tokio_modbus::client::Reader;
 use tokio_modbus::Slave;
@@ -57,7 +58,11 @@ async fn two_units_share_the_bus_one_request_at_a_time() {
     // caught sending the next request while one is still pending.
     bus.set_response_delay(Duration::from_millis(30));
     let (tx, mut rx) = mpsc::channel(64);
-    let poller = tokio::spawn(run_connection(connection(&bus, 0, two_devices()), tx));
+    let poller = tokio::spawn(run_connection(
+        connection(&bus, 0, two_devices()),
+        tx,
+        StatusReporter::disabled(),
+    ));
 
     // First tick only.
     let readings = collect_for(&mut rx, Duration::from_millis(500)).await;
@@ -116,7 +121,11 @@ async fn two_units_share_the_bus_one_request_at_a_time() {
 async fn inter_frame_delay_enforces_a_minimum_gap_between_frames() {
     let bus = MockRtuBus::start();
     let (tx, mut rx) = mpsc::channel(64);
-    let poller = tokio::spawn(run_connection(connection(&bus, 50, two_devices()), tx));
+    let poller = tokio::spawn(run_connection(
+        connection(&bus, 50, two_devices()),
+        tx,
+        StatusReporter::disabled(),
+    ));
     collect_for(&mut rx, Duration::from_millis(600)).await;
     poller.abort();
 
@@ -135,7 +144,11 @@ async fn inter_frame_delay_enforces_a_minimum_gap_between_frames() {
     // above is the setting's doing, not incidental latency.
     let bus = MockRtuBus::start();
     let (tx, mut rx) = mpsc::channel(64);
-    let poller = tokio::spawn(run_connection(connection(&bus, 0, two_devices()), tx));
+    let poller = tokio::spawn(run_connection(
+        connection(&bus, 0, two_devices()),
+        tx,
+        StatusReporter::disabled(),
+    ));
     collect_for(&mut rx, Duration::from_millis(300)).await;
     poller.abort();
 
@@ -152,7 +165,11 @@ async fn silent_unit_times_out_without_affecting_the_other() {
     let bus = MockRtuBus::start();
     bus.set_unit(1, UnitBehavior::Silent);
     let (tx, mut rx) = mpsc::channel(64);
-    let poller = tokio::spawn(run_connection(connection(&bus, 0, two_devices()), tx));
+    let poller = tokio::spawn(run_connection(
+        connection(&bus, 0, two_devices()),
+        tx,
+        StatusReporter::disabled(),
+    ));
 
     // Two ticks' worth.
     let readings = collect_for(&mut rx, Duration::from_millis(1500)).await;
@@ -228,6 +245,7 @@ async fn unplugged_adapter_is_reopened_after_replug() {
     let poller = tokio::spawn(run_connection(
         connection(&bus, 0, vec![device("sensor1", 1)]),
         tx,
+        StatusReporter::disabled(),
     ));
 
     let reading = tokio::time::timeout(Duration::from_secs(1), rx.recv())
