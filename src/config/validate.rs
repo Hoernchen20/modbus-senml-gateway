@@ -12,6 +12,11 @@ pub enum ValidationError {
     #[error("mqtt.qos = {0} is not a valid QoS (allowed: 0, 1, 2)")]
     InvalidQos(u8),
 
+    #[error(
+        "gateway.log_level = '{0}' is not a valid level (allowed: off, error, warn, info, debug, trace)"
+    )]
+    InvalidLogLevel(String),
+
     #[error("connection '{connection}': duplicate unit_id {unit_id}")]
     DuplicateUnitId { connection: String, unit_id: u8 },
 
@@ -91,6 +96,17 @@ pub fn validate(config: &Config) -> Result<(), ValidationError> {
         return Err(ValidationError::ZeroInterval {
             field: "gateway.aggregation_window_secs".to_string(),
         });
+    }
+
+    if config
+        .gateway
+        .log_level
+        .parse::<tracing::level_filters::LevelFilter>()
+        .is_err()
+    {
+        return Err(ValidationError::InvalidLogLevel(
+            config.gateway.log_level.clone(),
+        ));
     }
 
     if config.mqtt.qos > 2 {
@@ -351,6 +367,16 @@ mod tests {
         assert!(matches!(
             validate(&config),
             Err(ValidationError::InvalidQos(3))
+        ));
+    }
+
+    #[test]
+    fn invalid_log_level_is_rejected() {
+        let mut config = valid_config();
+        config.gateway.log_level = "verbose".to_string();
+        assert!(matches!(
+            validate(&config),
+            Err(ValidationError::InvalidLogLevel(level)) if level == "verbose"
         ));
     }
 
