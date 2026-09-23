@@ -6,6 +6,9 @@ use super::schema::{Config, Transport};
 
 #[derive(Debug, Error)]
 pub enum ValidationError {
+    #[error("{field} must be greater than 0")]
+    ZeroInterval { field: String },
+
     #[error("connection '{connection}': duplicate unit_id {unit_id}")]
     DuplicateUnitId { connection: String, unit_id: u8 },
 
@@ -71,9 +74,23 @@ pub enum ValidationError {
 }
 
 pub fn validate(config: &Config) -> Result<(), ValidationError> {
+    // A zero here would panic `tokio::time::interval` (poller) or divide by
+    // zero in the aggregator's boundary alignment.
+    if config.gateway.aggregation_window_secs == 0 {
+        return Err(ValidationError::ZeroInterval {
+            field: "gateway.aggregation_window_secs".to_string(),
+        });
+    }
+
     let mut serial_ports: HashMap<String, String> = HashMap::new();
 
     for conn in &config.connections {
+        if conn.poll_interval_secs == 0 {
+            return Err(ValidationError::ZeroInterval {
+                field: format!("connection '{}': poll_interval_secs", conn.id),
+            });
+        }
+
         let mut seen_unit_ids = HashSet::new();
         for device in &conn.devices {
             if !seen_unit_ids.insert(device.unit_id) {
@@ -266,6 +283,24 @@ mod tests {
     #[test]
     fn valid_config_passes() {
         validate(&valid_config()).expect("fixture config must be valid");
+    }
+
+    #[test]
+    fn zero_aggregation_window_is_rejected() {
+        let mut config = valid_config();
+        config.gateway.aggregation_window_secs = 0;
+
+        let err = validate(&config).unwrap_err();
+        assert!(matches!(err, ValidationError::ZeroInterval { .. }));
+    }
+
+    #[test]
+    fn zero_poll_interval_is_rejected() {
+        let mut config = valid_config();
+        config.connections[0].poll_interval_secs = 0;
+
+        let err = validate(&config).unwrap_err();
+        assert!(matches!(err, ValidationError::ZeroInterval { .. }));
     }
 
     #[test]

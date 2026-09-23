@@ -708,8 +708,12 @@ connection omits the device rollup entirely (`connection rs485-bus1: down`).
 
 ## 13. Open items (carried from architecture notes)
 
-- Pin down `is_transport_fatal` (§6.1) against the concrete error type
-  `tokio-modbus` returns for the chosen version.
+- ~~Pin down `is_transport_fatal` (§6.1) against the concrete error type
+  `tokio-modbus` returns for the chosen version.~~ Decided (tokio-modbus
+  0.17): reads return `Result<Result<T, ExceptionCode>, Error>`. Exception
+  responses are the inner `Err` (skip device); `Error::Protocol` (header /
+  function-code mismatch, e.g. a late reply after a timeout) also skips the
+  device; only `Error::Transport(io::Error)` is fatal and reconnects.
 - ~~Confirm default `inter_frame_delay_ms` is fine at 0 until a specific
   adapter proves otherwise.~~ Decided: keep 0 as default (§4.2); this is a
   field-tuning knob, not something to guess up front — raise it per-connection
