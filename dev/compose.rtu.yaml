@@ -1,0 +1,7 @@
+# Opt-in override that passes the host's RS-485 adapter into the gateway
+# container as /dev/ttyRTU0. Kept separate because compose refuses to start
+# when a mapped device does not exist. Enabled via COMPOSE_FILE in dev/.env.
+services:
+  gateway:
+    devices:
+      - "${RTU_DEVICE:?set RTU_DEVICE in dev/.env}:/dev/ttyRTU0"

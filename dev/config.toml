@@ -1,0 +1,92 @@
+# Gateway config for the docker compose test setup (dev/compose.yaml).
+# The [gateway] and [mqtt] sections match the compose services; adjust the
+# [[connection]] sections to your devices. Every option is documented in
+# ../config.example.toml.
+
+[gateway]
+id = "gw-dev"
+# Short window so messages show up quickly while testing.
+aggregation_window_secs = 10
+base_name_prefix = "urn:dev:gw-dev:"
+# "debug" also shows every MQTT packet and Modbus request.
+log_level = "info"
+# Inside the container: docker compose exec gateway cat /tmp/status
+status_file_path = "/tmp/status"
+status_debounce_secs = 2
+status_heartbeat_secs = 30
+
+[mqtt]
+broker_host = "mosquitto"   # compose service name, in the broker certificate
+broker_port = 8883
+client_id = "modbus-gateway-dev"
+tls = true
+ca_cert_path = "/etc/modbus-gateway/ca.pem"
+username = "gateway"
+password_env = "MQTT_PASSWORD"
+qos = 1
+keep_alive_secs = 30
+topic_template = "telemetry/{device}"
+
+# ---- Modbus/TCP device ------------------------------------------------------
+[[connection]]
+id = "tcp1"
+transport = "tcp"
+host = "192.168.1.50"   # reachable from the container via the host's network
+port = 502
+poll_interval_secs = 2
+io_timeout_ms = 1000
+
+  [[connection.device]]
+  id = "meter1"
+  unit_id = 1
+
+    [[connection.device.block]]
+    function = "holding"
+    start = 0
+    count = 2
+
+      [[connection.device.block.point]]
+      name = "value0"
+      offset = 0
+      data_type = "u16"
+      unit = ""
+
+      [[connection.device.block.point]]
+      name = "value1"
+      offset = 1
+      data_type = "u16"
+      unit = ""
+
+# ---- Modbus/RTU device ------------------------------------------------------
+# Needs the adapter mapped in via dev/.env (see README). Without it this
+# connection just keeps retrying; the TCP connection is not affected.
+[[connection]]
+id = "rtu1"
+transport = "rtu"
+serial_port = "/dev/ttyRTU0"   # mapped from RTU_DEVICE in dev/.env
+baud_rate = 9600
+parity = "none"
+stop_bits = 1
+poll_interval_secs = 2
+io_timeout_ms = 500
+
+  [[connection.device]]
+  id = "sensor1"
+  unit_id = 1
+
+    [[connection.device.block]]
+    function = "input"
+    start = 0
+    count = 2
+
+      [[connection.device.block.point]]
+      name = "value0"
+      offset = 0
+      data_type = "u16"
+      unit = ""
+
+      [[connection.device.block.point]]
+      name = "value1"
+      offset = 1
+      data_type = "u16"
+      unit = ""

@@ -169,6 +169,10 @@ cargo test
 The tests include integration tests against a mock Modbus/TCP server, a
 virtual serial port pair for RTU, and an embedded MQTT broker.
 
+To test against real Modbus/TCP and RTU devices, [dev/](dev/README.md) has
+a docker compose setup that runs the gateway together with a TLS
+Mosquitto broker and a subscriber that prints the SenML messages.
+
 Design details:
 
 - [design.md](design.md): specification (config schema, error handling,

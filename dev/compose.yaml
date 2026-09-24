@@ -1,0 +1,76 @@
+# Local test setup: the gateway (built from this repo), a TLS Mosquitto
+# broker with a self-signed CA, and a subscriber printing all telemetry.
+# See dev/README.md.
+
+name: modbus2senml-dev
+
+services:
+  # One-shot: creates CA, broker certificate and password file in ./pki.
+  pki:
+    image: eclipse-mosquitto:2
+    entrypoint: ["/bin/sh", "/gen-pki.sh"]
+    volumes:
+      - ./mosquitto/gen-pki.sh:/gen-pki.sh:ro
+      - ./pki:/pki
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    depends_on:
+      pki:
+        condition: service_completed_successfully
+    ports:
+      - "8883:8883"
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./pki:/pki:ro
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-h", "localhost", "-p", "8883",
+             "--cafile", "/pki/ca.pem", "-u", "viewer", "-P", "viewer-dev",
+             "-t", "$$SYS/broker/uptime", "-C", "1", "-W", "3"]
+      start_period: 30s
+      start_interval: 1s
+      interval: 60s
+      timeout: 5s
+      retries: 3
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: dev/Dockerfile
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    restart: unless-stopped
+    environment:
+      MQTT_PASSWORD: gateway-dev
+    volumes:
+      - ./config.toml:/etc/modbus-gateway/config.toml:ro
+      - ./pki/ca.pem:/etc/modbus-gateway/ca.pem:ro
+    # The RS-485 adapter is mapped in compose.rtu.yaml (opt-in, see README).
+
+  # Prints every message below telemetry/ (SenML packs and the gateway's
+  # online/offline status). Follow with: docker compose logs -f subscriber
+  subscriber:
+    image: eclipse-mosquitto:2
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    restart: unless-stopped
+    entrypoint:
+      - mosquitto_sub
+      - -h
+      - mosquitto
+      - -p
+      - "8883"
+      - --cafile
+      - /pki/ca.pem
+      - -u
+      - viewer
+      - -P
+      - viewer-dev
+      - -t
+      - "telemetry/#"
+      - -F
+      - "%I %t %r %p"
+    volumes:
+      - ./pki/ca.pem:/pki/ca.pem:ro
