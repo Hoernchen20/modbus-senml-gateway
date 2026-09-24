@@ -1,0 +1,363 @@
+# Example configuration for modbus-senml-gateway.
+#
+# Copy to /etc/modbus-gateway/config.toml (the default path) or pass another
+# path as the first command-line argument. The file is read once at startup:
+# any change needs a service restart. An invalid config makes the gateway
+# print an error naming the bad field and exit non-zero; it never starts
+# with a partially valid config.
+#
+# Structure:
+#   [gateway]                              general settings
+#   [mqtt]                                 broker connection
+#   [[connection]]                         one per TCP socket or serial port (repeatable)
+#     [[connection.device]]                one per Modbus unit on that connection
+#       [[connection.device.block]]        one Modbus read request (contiguous registers)
+#         [[connection.device.block.point]] one measured value inside that block
+#
+# "Required" fields must be present. "Optional" fields show their default.
+# Limits marked "checked" are enforced at startup; limits marked
+# "not checked" are not enforced, but values outside them will not work.
+
+# =============================================================================
+[gateway]
+# =============================================================================
+
+# Name of this gateway instance. Used as the syslog tag, in the status file,
+# and in the MQTT online/offline topic "telemetry/<id>/status".
+# Required. Any string; keep it short and free of spaces and "/", "+", "#"
+# because it becomes part of an MQTT topic.
+id = "gw-router1"
+
+# Length of the averaging window in seconds. Every point is averaged over
+# this window and published once per window. Windows align to wall-clock
+# multiples of this value (60 = on every full minute).
+# Required. Must be > 0 (checked). Should be larger than the slowest
+# poll_interval_secs, or some windows will have no samples.
+aggregation_window_secs = 60
+
+# Prefix for the SenML base name. Each device's pack gets
+#   bn = <base_name_prefix><device id>:
+# e.g. "urn:dev:gw-router1:meter1:".
+# Required. Any string (may be empty).
+base_name_prefix = "urn:dev:gw-router1:"
+
+# Minimum level of messages sent to syslog.
+# Required. One of: "off", "error", "warn", "info", "debug", "trace"
+# (checked, case-insensitive).
+log_level = "info"
+
+# File where a short plain-text connectivity summary is written (MQTT state
+# and one line per connection). It is written to "<path>.tmp" and then
+# renamed, so the directory must be writable by the service user.
+# Optional. Default: "/dev/container_config/status". Output is capped at
+# 2048 bytes.
+status_file_path = "/dev/container_config/status"
+
+# Minimum delay in seconds between a state change and the resulting status
+# file write. Groups rapid changes (e.g. a flapping connection) into one write.
+# Optional. Default: 2. 0 writes on every change.
+status_debounce_secs = 2
+
+# The status file is rewritten at least this often (seconds), even without
+# changes, so its "updated:" timestamp shows the gateway is alive.
+# Optional. Default: 30. Must be > 0 (not checked; 0 rewrites the file in a
+# tight loop).
+status_heartbeat_secs = 30
+
+# =============================================================================
+[mqtt]
+# =============================================================================
+
+# Hostname or IP address of the MQTT broker.
+# Required. With tls = true this must match a name in the broker's certificate.
+broker_host = "10.0.0.5"
+
+# Broker TCP port.
+# Required. 1-65535. Usually 8883 for TLS, 1883 without.
+broker_port = 8883
+
+# MQTT client id. The gateway uses a persistent session, so this must stay
+# the same across restarts and must be unique on the broker (a second client
+# with the same id disconnects the first).
+# Required.
+client_id = "modbus-gateway-router1"
+
+# Encrypt the broker connection with TLS. Only the CA in ca_cert_path is
+# trusted; the system certificate store is not used. No client certificate
+# is sent.
+# Required. true or false.
+tls = true
+
+# Path to the PEM file with the CA certificate(s) that signed the broker's
+# certificate.
+# Required, and the file must exist and contain at least one PEM certificate
+# (checked), even when tls = false.
+ca_cert_path = "/etc/modbus-gateway/ca.pem"
+
+# Username for broker authentication.
+# Required.
+username = "gateway"
+
+# Name of the environment variable holding the broker password. The
+# password itself is never stored in this file. With the OpenRC service,
+# set it in /etc/conf.d/modbus-gateway via
+#   supervise_daemon_args="--env MQTT_PASSWORD=..."
+# Required. Startup fails if the variable is not set.
+password_env = "MQTT_PASSWORD"
+
+# MQTT quality of service for telemetry messages.
+#   0 = at most once (can lose messages around reconnects)
+#   1 = at least once (recommended; duplicates possible, timestamps identify them)
+#   2 = exactly once (more overhead, no real benefit for timestamped data)
+# Optional. Default: 1. Must be 0, 1 or 2 (checked).
+qos = 1
+
+# MQTT keep-alive interval in seconds. The client pings the broker when idle
+# for this long, and a dead connection is detected after about 1.5x this time.
+# Required. 0 disables keep-alive. Max 65535.
+keep_alive_secs = 30
+
+# Topic each device's SenML pack is published to. "{device}" is replaced by
+# the device id. One message per device per aggregation window.
+# Required. Should contain "{device}", otherwise all devices share one topic.
+topic_template = "telemetry/{device}"
+
+# =============================================================================
+# Connections
+# =============================================================================
+# One [[connection]] per physical link: a Modbus/TCP socket or a serial port
+# (RS-485 bus). All devices on one connection are polled one after another
+# by the same task. A failing connection does not affect other connections.
+# At least one [[connection]] is required.
+
+# ---- Connection 1: Modbus/TCP ----------------------------------------------
+[[connection]]
+
+# Name of this connection, used in logs and the status file.
+# Required. Should be unique.
+id = "meter-tcp1"
+
+# Transport type. Decides which of the transport fields below are allowed.
+# Required. "tcp" or "rtu".
+transport = "tcp"
+
+# --- tcp only ---
+# IP address or hostname of the Modbus/TCP device or gateway.
+# Required for tcp. Not allowed for rtu.
+host = "192.168.1.50"
+
+# TCP port of the Modbus server.
+# Required for tcp. 1-65535. The Modbus standard port is 502.
+port = 502
+
+# --- all transports ---
+# How often every device on this connection is polled, in seconds.
+# Required. Must be > 0 (checked). One poll reads all blocks of all devices,
+# so on slow serial buses this must leave enough time for that.
+poll_interval_secs = 10
+
+# Timeout for a single Modbus request in milliseconds. A device that does
+# not answer in time is skipped for this poll; the connection stays open.
+# Required. Must be > 0 (not checked; 0 makes every request time out).
+# Typical: 500-2000.
+io_timeout_ms = 1000
+
+# Delay before the first reconnect attempt after the connection failed,
+# in seconds. Doubles after each failed attempt up to the maximum below.
+# Optional. Default: 1. Should be > 0 (not checked; 0 retries without pause).
+reconnect_backoff_min_secs = 1
+
+# Upper limit for the reconnect delay in seconds.
+# Optional. Default: 30. Should be >= reconnect_backoff_min_secs
+# (not checked; a smaller value caps every retry delay at this value).
+reconnect_backoff_max_secs = 30
+
+  # ---- Device on connection 1 ----
+  [[connection.device]]
+
+  # Device name. Used in the MQTT topic ("{device}") and the SenML base name.
+  # Required. Should be unique across the whole gateway, otherwise two
+  # devices publish to the same topic. Avoid spaces and "/", "+", "#".
+  id = "meter1"
+
+  # Modbus unit id (slave address) of the device.
+  # Required. 0-255 by type; must be unique within this connection (checked).
+  # Modbus RTU devices use 1-247 (0 is broadcast and never answers).
+  # Modbus/TCP devices usually accept 1 or 255 - see the device manual.
+  unit_id = 1
+
+    # ---- Block: one read request ----
+    [[connection.device.block]]
+
+    # Register type to read.
+    #   "holding" = holding registers (function code 3, "4xxxx")
+    #   "input"   = input registers   (function code 4, "3xxxx")
+    # Required.
+    function = "holding"
+
+    # Address of the first register, as sent on the wire (0-based).
+    # Datasheets that use 1-based notation like 40001 / 30001 need
+    # converting: 40001 -> 0, 43001 -> 3000, 30101 -> 100.
+    # Required. 0-65535; start + count must not exceed 65536 (not checked).
+    start = 3000
+
+    # Number of 16-bit registers read in this request.
+    # Required. 1-125 (checked: the Modbus limit per read request).
+    count = 8
+
+    # Order of the two registers that form a 32-bit value (u32, i32, f32).
+    #   "big_endian"    = first register holds the high 16 bits (most common)
+    #   "little_endian" = first register holds the low 16 bits ("word swap")
+    # Bytes inside each register are always big-endian, as Modbus defines.
+    # Optional. Default: "big_endian". Applies to all points in this block.
+    word_order = "big_endian"
+
+      # ---- Point: one value inside the block ----
+      [[connection.device.block.point]]
+
+      # Measurement name, published as SenML "n".
+      # Required. Should be unique within the device.
+      name = "voltage_l1"
+
+      # Position of the value inside the block, counted in registers from
+      # "start" (0 = the register at "start").
+      # Required. offset + width of data_type must be <= count (checked).
+      # Points in one block must not overlap (checked).
+      offset = 0
+
+      # How the register(s) are interpreted:
+      #   "u16" = unsigned 16 bit (1 register)
+      #   "i16" = signed 16 bit   (1 register)
+      #   "u32" = unsigned 32 bit (2 registers)
+      #   "i32" = signed 32 bit   (2 registers)
+      #   "f32" = IEEE-754 float  (2 registers)
+      # Required.
+      data_type = "f32"
+
+      # Unit, published as SenML "u". Use SenML/UCUM unit names,
+      # e.g. "V", "A", "W", "Wh", "kWh", "Cel", "%RH", "Hz".
+      # Required. Any string.
+      unit = "V"
+
+      # Factor applied to the raw value: value = raw * scale.
+      # Optional. Default: 1.0. Any number, may be negative.
+      # scale = 1.0
+
+      # If true, the absolute value is published (applied after scale).
+      # Useful where only the magnitude matters, e.g. a current transformer
+      # that may be installed the wrong way round.
+      # Optional. Default: false.
+      # absolute = false
+
+      [[connection.device.block.point]]
+      name = "current_l1"
+      offset = 2
+      data_type = "f32"
+      unit = "A"
+
+      [[connection.device.block.point]]
+      name = "active_power"
+      offset = 4
+      data_type = "i32"
+      scale = 0.1
+      absolute = true
+      unit = "W"
+
+    # A second block on the same device: registers that are not adjacent
+    # to the first block need their own read request.
+    [[connection.device.block]]
+    function = "holding"
+    start = 3100
+    count = 2
+
+      [[connection.device.block.point]]
+      name = "energy_total"
+      offset = 0
+      data_type = "u32"
+      scale = 0.001
+      unit = "kWh"
+
+# ---- Connection 2: Modbus/RTU on an RS-485 bus -----------------------------
+[[connection]]
+id = "rs485-bus1"
+transport = "rtu"
+
+# --- rtu only ---
+# Serial device. Prefer a stable /dev/serial/by-id/... path over
+# /dev/ttyUSBn, because USB adapters can be renumbered after a reboot.
+# Required for rtu. Not allowed for tcp. Each serial port may be used by
+# only one connection (checked).
+serial_port = "/dev/serial/by-id/usb-FTDI_USB-RS485-if00-port0"
+
+# Baud rate. Must match all devices on the bus.
+# Required for rtu. Common values: 9600, 19200, 38400, 57600, 115200.
+baud_rate = 9600
+
+# Data bits per character.
+# Optional. Default: 8. Allowed: 5, 6, 7, 8 (checked). Modbus RTU uses 8.
+data_bits = 8
+
+# Parity.
+# Optional. Default: "none". One of "none", "even", "odd".
+# The Modbus standard specifies "even", but many devices default to "none".
+parity = "none"
+
+# Stop bits.
+# Optional. Default: 1. Allowed: 1, 2 (checked). The Modbus standard uses
+# 2 stop bits when parity is "none"; many devices accept 1.
+stop_bits = 1
+
+# Extra pause after each request on the bus, in milliseconds. Increase if a
+# USB/RS-485 adapter or a slow device misses frames when polled back to back.
+# Optional. Default: 0.
+inter_frame_delay_ms = 10
+
+poll_interval_secs = 15
+io_timeout_ms = 500
+
+  # Several devices can share one RS-485 bus; each needs its own unit_id.
+  [[connection.device]]
+  id = "tempsensor1"
+  unit_id = 5
+
+    [[connection.device.block]]
+    function = "input"
+    start = 100
+    count = 2
+
+      [[connection.device.block.point]]
+      name = "temperature"
+      offset = 0
+      data_type = "i16"
+      scale = 0.1
+      unit = "Cel"
+
+      [[connection.device.block.point]]
+      name = "humidity"
+      offset = 1
+      data_type = "u16"
+      scale = 0.1
+      unit = "%RH"
+
+  [[connection.device]]
+  id = "tempsensor2"
+  unit_id = 6
+
+    [[connection.device.block]]
+    function = "input"
+    start = 100
+    count = 2
+
+      [[connection.device.block.point]]
+      name = "temperature"
+      offset = 0
+      data_type = "i16"
+      scale = 0.1
+      unit = "Cel"
+
+      [[connection.device.block.point]]
+      name = "humidity"
+      offset = 1
+      data_type = "u16"
+      scale = 0.1
+      unit = "%RH"
