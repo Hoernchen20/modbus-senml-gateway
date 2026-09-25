@@ -39,6 +39,19 @@ All commands run in `dev/`.
    docker compose up -d --build
    ```
 
+### Tested example: Jean Müller PLmulti-2 over RTU
+
+[config.plmulti2-example.toml](config.plmulti2-example.toml) is a working
+config for a Jean Müller PLmulti-2 measuring device on Modbus/RTU (unit id
+5, 9600 baud, 8E2). It reads voltages, currents, active and reactive power
+per phase from holding registers 1000–1029 (`f32`, little-endian word
+order). Power values are scaled from kW/kvar to W/var. To use it:
+
+```sh
+cp config.plmulti2-example.toml config.toml
+docker compose restart gateway
+```
+
 ## Watch
 
 ```sh

@@ -1,0 +1,132 @@
+# Gateway config for the docker compose test setup (dev/compose.yaml).
+# The [gateway] and [mqtt] sections match the compose services; adjust the
+# [[connection]] sections to your devices. Every option is documented in
+# ../config.example.toml.
+
+[gateway]
+id = "gw-dev"
+# Short window so messages show up quickly while testing.
+aggregation_window_secs = 60
+base_name_prefix = "urn:dev:gw-dev:"
+# "debug" also shows every MQTT packet and Modbus request.
+log_level = "info"
+# Inside the container: docker compose exec gateway cat /tmp/status
+status_file_path = "/tmp/status"
+status_debounce_secs = 2
+status_heartbeat_secs = 30
+
+[mqtt]
+broker_host = "mosquitto"   # compose service name, in the broker certificate
+broker_port = 8883
+client_id = "modbus-gateway-dev"
+tls = true
+ca_cert_path = "/etc/modbus-gateway/ca.pem"
+username = "gateway"
+password_env = "MQTT_PASSWORD"
+qos = 1
+keep_alive_secs = 30
+topic_template = "telemetry/{device}"
+
+# ---- Modbus/RTU device ------------------------------------------------------
+# Needs the adapter mapped in via dev/.env (see README). Without it this
+# connection just keeps retrying; the TCP connection is not affected.
+[[connection]]
+id = "rtu1"
+transport = "rtu"
+serial_port = "/dev/ttyRTU0"   # mapped from RTU_DEVICE in dev/.env
+baud_rate = 9600
+parity = "even"
+stop_bits = 2
+poll_interval_secs = 3
+io_timeout_ms = 500
+
+  [[connection.device]]
+  id = "NSHV"
+  unit_id = 5
+
+    [[connection.device.block]]
+    function = "holding"
+    start = 1000
+    count = 30
+    word_order = "little_endian"
+
+      [[connection.device.block.point]]
+      name = "U1"
+      offset = 0
+      data_type = "f32"
+      unit = "V"
+
+      [[connection.device.block.point]]
+      name = "U2"
+      offset = 2
+      data_type = "f32"
+      unit = "V"
+
+      [[connection.device.block.point]]
+      name = "U3"
+      offset = 4
+      data_type = "f32"
+      unit = "V"
+
+      [[connection.device.block.point]]
+      name = "I1"
+      offset = 8
+      data_type = "f32"
+      unit = "A"
+      absolute = true
+
+      [[connection.device.block.point]]
+      name = "I2"
+      offset = 10
+      data_type = "f32"
+      unit = "A"
+      absolute = true
+
+      [[connection.device.block.point]]
+      name = "I3"
+      offset = 12
+      data_type = "f32"
+      unit = "A"
+      absolute = true
+
+      [[connection.device.block.point]]
+      name = "P1"
+      offset = 16
+      data_type = "f32"
+      unit = "W"
+      scale = 1000.0
+
+      [[connection.device.block.point]]
+      name = "P2"
+      offset = 18
+      data_type = "f32"
+      unit = "W"
+      scale = 1000.0
+
+      [[connection.device.block.point]]
+      name = "P3"
+      offset = 20
+      data_type = "f32"
+      unit = "W"
+      scale = 1000.0
+
+      [[connection.device.block.point]]
+      name = "Q1"
+      offset = 24
+      data_type = "f32"
+      unit = "var"
+      scale = 1000.0
+
+      [[connection.device.block.point]]
+      name = "Q2"
+      offset = 26
+      data_type = "f32"
+      unit = "var"
+      scale = 1000.0
+
+      [[connection.device.block.point]]
+      name = "Q3"
+      offset = 28
+      data_type = "f32"
+      unit = "var"
+      scale = 1000.0
