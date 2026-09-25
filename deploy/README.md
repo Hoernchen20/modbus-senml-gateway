@@ -3,6 +3,9 @@
 Single static musl binary, run as an OpenRC service inside an Alpine LXC
 container (design.md §10).
 
+For the router's armv7 container runtime, [router/](router/README.md)
+builds the complete Alpine rootfs (binary, start script, config) in Docker.
+
 ## Build
 
 The release profile in `Cargo.toml` already sets `opt-level = "z"`, LTO,

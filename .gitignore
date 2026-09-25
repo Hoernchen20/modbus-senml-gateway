@@ -1,3 +1,6 @@
 /target
 /dev/pki/
 /dev/.env
+/dist
+/deploy/router/site/*
+!/deploy/router/site/.gitkeep

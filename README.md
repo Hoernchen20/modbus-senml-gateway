@@ -137,7 +137,15 @@ to stderr until it is.
 
 ## How to build
 
-<!-- TODO -->
+```sh
+cargo build --release
+```
+
+For the router, [deploy/router/](deploy/router/README.md) cross-compiles
+the gateway for armv7 in Docker and builds the complete Alpine rootfs
+(`dist/alpine-rootfs.tgz`) that is installed on the router.
+Static builds for other targets are described in
+[deploy/README.md](deploy/README.md#build).
 
 ## Deployment
 
