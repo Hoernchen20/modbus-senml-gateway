@@ -1,11 +1,13 @@
 # Router container image (armv7)
 
 Builds `dist/alpine-rootfs.tgz`, a complete Alpine rootfs for the
-router's container runtime. It contains the gateway, a start script, and
-optionally your site config. It follows the router manufacturer's example
-scripts (download the Alpine minirootfs, add packages and binaries, add
-`/etc/start.sh`, pack everything as a `.tgz`), but the whole build runs in
-Docker on an x86_64 host:
+router's container runtime. It contains the gateway and a start script.
+The site config is not part of the image; the router mounts it into the
+container at runtime (see [Site config](#site-config)). The build follows
+the router manufacturer's example scripts (download the Alpine
+minirootfs, add packages and binaries, add `/etc/start.sh`, pack
+everything as a `.tgz`), but the whole build runs in Docker on an
+x86_64 host:
 
 - The gateway is **cross-compiled** for `armv7-unknown-linux-musleabihf`
   as a static binary. Zig (via `cargo-zigbuild`) provides the armv7
@@ -47,19 +49,33 @@ Dockerfile by hand.
 
 ## Site config
 
-Files in `deploy/router/site/` are copied to `/etc/modbus-gateway/` in the
-rootfs. The directory is git-ignored except for `.gitkeep`, so it can hold
-secrets.
+The site config is not built into the rootfs. Upload the files through the
+router's container configuration; the router mounts them into the running
+container under `/dev/container_config/files/`. The same image can
+therefore be used on every router, and changing the config needs no
+rebuild.
 
 | File           | Purpose                                                   |
 |----------------|-----------------------------------------------------------|
-| `config.toml`  | Gateway config (see `config.example.toml`, which is always included as `/etc/modbus-gateway/config.example.toml`) |
-| `ca.pem`       | Broker CA certificate, at the path set in `mqtt.ca_cert_path` |
-| `gateway.env`  | `MQTT_PASSWORD=...`. The variable name must match `mqtt.password_env`. Installed with mode 0600. |
+| `config.toml`  | Gateway config (see `config.example.toml`, also included in the image as `/usr/local/share/modbus-gateway/config.example.toml`) |
+| `ca.pem`       | Broker CA certificate. Set `mqtt.ca_cert_path = "/dev/container_config/files/ca.pem"` |
+| `gateway.env`  | `MQTT_PASSWORD=...`. The variable name must match `mqtt.password_env`. |
 
-Without `config.toml` the image still builds. The gateway then waits,
-checking every 5 s and logging, until
-`/etc/modbus-gateway/config.toml` appears in the running container.
+`mqtt.ca_cert_path` has to point into the mounted directory:
+
+```toml
+[mqtt]
+ca_cert_path = "/dev/container_config/files/ca.pem"
+```
+
+`status_file_path` already defaults to `/dev/container_config/status`,
+where the router shows it outside the container.
+
+Until `config.toml` is present, the gateway waits, checking every 5 s and
+logging. `config.toml` and `gateway.env` are read each time the gateway
+(re)starts, so after changing them restart the container or kill the
+`modbus-senml-gateway` process; `run-gateway` starts it again with the
+new files after 5 s.
 
 ## What runs in the container
 
@@ -75,9 +91,9 @@ The router runs `/etc/start.sh` when the container boots. The script:
 otherwise not reachable. Anything added to it has to be started in the
 background (`&`) or be a self-daemonizing command.
 
-`run-gateway` loads `gateway.env`, runs
-`/usr/local/bin/modbus-senml-gateway /etc/modbus-gateway/config.toml` and
-restarts it 5 s after any exit. SIGTERM is forwarded to the gateway, which
+`run-gateway` loads `/dev/container_config/files/gateway.env`, runs
+`/usr/local/bin/modbus-senml-gateway /dev/container_config/files/config.toml`
+and restarts it 5 s after any exit. SIGTERM is forwarded to the gateway, which
 then shuts down gracefully (see [../README.md](../README.md)). Gateway
 stderr, which is only used while `/dev/log` is missing, goes to
 `/var/log/modbus-gateway.err`.

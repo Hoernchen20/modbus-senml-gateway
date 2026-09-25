@@ -1,6 +1,7 @@
 # Builds the complete Alpine rootfs for the router's container runtime
 # (armv7): the gateway cross-compiled as a static musl binary, installed
 # into the official Alpine minirootfs together with a start script.
+# Site config is not built in; the router mounts it at runtime.
 #
 # Follows the router manufacturer's example scripts, but everything runs
 # on the x86_64 build host: Rust cross-compiles (zig provides the armv7 C
@@ -58,20 +59,12 @@ RUN apk --root /rootfs --no-cache --no-scripts upgrade \
 COPY --from=build /modbus-senml-gateway /rootfs/usr/local/bin/modbus-senml-gateway
 COPY deploy/router/start.sh /rootfs/etc/start.sh
 COPY deploy/router/run-gateway.sh /rootfs/usr/local/sbin/run-gateway
-COPY config.example.toml /rootfs/etc/modbus-gateway/config.example.toml
-# Site-specific files (config.toml, CA certificate, gateway.env); see
-# deploy/router/README.md. May be empty apart from .gitkeep.
-COPY deploy/router/site/ /rootfs/etc/modbus-gateway/
+# Reference only: the site config is not part of the image. The router
+# mounts it at runtime under /dev/container_config/files (see README.md).
+COPY config.example.toml /rootfs/usr/local/share/modbus-gateway/config.example.toml
 
 RUN set -e; \
-    rm -f /rootfs/etc/modbus-gateway/.gitkeep; \
     chmod 0755 /rootfs/etc/start.sh /rootfs/usr/local/sbin/run-gateway \
                /rootfs/usr/local/bin/modbus-senml-gateway; \
-    chown -R root:root /rootfs/etc/modbus-gateway; \
-    chmod 0750 /rootfs/etc/modbus-gateway; \
-    find /rootfs/etc/modbus-gateway -type f -exec chmod 0640 {} +; \
-    if [ -f /rootfs/etc/modbus-gateway/gateway.env ]; then \
-        chmod 0600 /rootfs/etc/modbus-gateway/gateway.env; \
-    fi; \
     mkdir -p /rootfs/etc/init.d /out; \
     tar czf /out/alpine-rootfs.tgz --numeric-owner -C /rootfs .

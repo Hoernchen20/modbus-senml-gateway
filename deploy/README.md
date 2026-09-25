@@ -4,7 +4,8 @@ Single static musl binary, run as an OpenRC service inside an Alpine LXC
 container (design.md §10).
 
 For the router's armv7 container runtime, [router/](router/README.md)
-builds the complete Alpine rootfs (binary, start script, config) in Docker.
+builds the complete Alpine rootfs (binary, start script) in Docker. The
+site config is mounted by the router at runtime.
 
 ## Build
 

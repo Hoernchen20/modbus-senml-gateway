@@ -6,10 +6,12 @@
 # covers anything that takes the whole process down.
 
 BIN=/usr/local/bin/modbus-senml-gateway
-CONFIG=/etc/modbus-gateway/config.toml
+# The router mounts the site files from outside the container here.
+CONFIG_DIR=/dev/container_config/files
+CONFIG=$CONFIG_DIR/config.toml
 # Holds the MQTT password, e.g. MQTT_PASSWORD=... (the variable name must
 # match mqtt.password_env in the config).
-ENV_FILE=/etc/modbus-gateway/gateway.env
+ENV_FILE=$CONFIG_DIR/gateway.env
 RESPAWN_DELAY=5
 # stderr of the gateway; it only writes there while /dev/log is missing.
 ERROR_LOG=/var/log/modbus-gateway.err
@@ -17,12 +19,6 @@ ERROR_LOG=/var/log/modbus-gateway.err
 log() {
 	logger -t run-gateway -p daemon.err "$1" 2>/dev/null || echo "$1" >&2
 }
-
-if [ -r "$ENV_FILE" ]; then
-	set -a
-	. "$ENV_FILE"
-	set +a
-fi
 
 child=
 # Forward SIGTERM/SIGINT so the gateway can shut down gracefully.
@@ -32,6 +28,13 @@ while [ -z "$stopping" ]; do
 	if [ ! -r "$CONFIG" ]; then
 		log "config $CONFIG not readable, retrying in ${RESPAWN_DELAY}s"
 	else
+		# Loaded before every start: the mounted files may appear or change
+		# while the container is running.
+		if [ -r "$ENV_FILE" ]; then
+			set -a
+			. "$ENV_FILE"
+			set +a
+		fi
 		"$BIN" "$CONFIG" 2>>"$ERROR_LOG" &
 		child=$!
 		wait "$child"
