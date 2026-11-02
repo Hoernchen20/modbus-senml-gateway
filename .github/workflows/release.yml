@@ -1,0 +1,47 @@
+# Pushing a tag vX.Y.Z (matching the version in Cargo.toml) builds the
+# router rootfs and publishes it as a GitHub release, together with a
+# CycloneDX SBOM listing every Alpine package and Rust crate in it. To
+# check whether a deployed release is affected by a CVE, look up the
+# package in that release's SBOM, or scan the SBOM with Trivy/Grype.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check tag matches Cargo.toml version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+      - run: deploy/router/build.sh
+      - run: mkdir rootfs && tar xzf dist/alpine-rootfs.tgz -C rootfs
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: rootfs
+          scan-ref: rootfs
+          format: cyclonedx
+          output: dist/sbom.cdx.json
+      - run: cd dist && sha256sum alpine-rootfs.tgz sbom.cdx.json > SHA256SUMS
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes \
+            dist/alpine-rootfs.tgz dist/sbom.cdx.json dist/SHA256SUMS

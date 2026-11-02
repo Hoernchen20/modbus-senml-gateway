@@ -157,6 +157,30 @@ On SIGTERM (`rc-service modbus-gateway stop`) the gateway stops polling,
 discards the unfinished averaging window, gives queued MQTT messages about
 2 s to be sent, and exits.
 
+## Security updates
+
+Dependabot opens PRs for crate and GitHub Actions updates. GitHub Actions
+run `cargo audit` daily and scan the router rootfs with Trivy weekly;
+accepted advisories are listed with reasons in
+[.cargo/audit.toml](.cargo/audit.toml) and
+[.trivyignore.yaml](.trivyignore.yaml).
+
+Pushing a tag `vX.Y.Z` (matching `Cargo.toml`) publishes a GitHub release
+with the rootfs and a CycloneDX SBOM (`sbom.cdx.json`) listing every
+Alpine package and crate with its version. To check whether a release is
+affected by a CVE, search its SBOM or scan it:
+
+```sh
+trivy sbom sbom.cdx.json
+```
+
+The gateway binary is built with `cargo auditable`, so a binary copied
+from a router can be checked directly, even without knowing its release:
+
+```sh
+cargo audit bin modbus-senml-gateway
+```
+
 ## Limitations
 
 - No buffering to disk. Messages are held in memory while the broker is

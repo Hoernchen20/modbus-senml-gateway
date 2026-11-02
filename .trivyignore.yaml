@@ -1,0 +1,21 @@
+# Trivy exceptions, mirroring .cargo/audit.toml (Trivy uses GHSA IDs and
+# scans the gateway binary via the dependency list cargo auditable embeds).
+# Each entry is limited to the exact package version it was assessed for.
+
+vulnerabilities:
+  # rustls-webpki 0.102.8 is a dependency of rumqttc 0.25.1, which only
+  # uses its `webpki::Error` type for a `TlsError` variant (src/tls.rs).
+  # Certificate verification runs through rustls 0.23 and rustls-webpki
+  # 0.103, which are patched. Remove once rumqttc drops or bumps it.
+  - id: GHSA-82j2-j2ch-gfr8 # RUSTSEC-2026-0104
+    purls: ["pkg:cargo/rustls-webpki@0.102.8"]
+    statement: Only the error type of rustls-webpki 0.102 is used (via rumqttc)
+  - id: GHSA-pwjx-qhcg-rvj4 # RUSTSEC-2026-0049
+    purls: ["pkg:cargo/rustls-webpki@0.102.8"]
+    statement: Only the error type of rustls-webpki 0.102 is used (via rumqttc)
+  - id: GHSA-965h-392x-2mh5 # RUSTSEC-2026-0098
+    purls: ["pkg:cargo/rustls-webpki@0.102.8"]
+    statement: Only the error type of rustls-webpki 0.102 is used (via rumqttc)
+  - id: GHSA-xgp8-3hg3-c2mh # RUSTSEC-2026-0099
+    purls: ["pkg:cargo/rustls-webpki@0.102.8"]
+    statement: Only the error type of rustls-webpki 0.102 is used (via rumqttc)

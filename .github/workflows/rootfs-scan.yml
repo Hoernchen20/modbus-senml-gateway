@@ -2,16 +2,18 @@
 # weekly because Alpine fixes (and new CVEs) arrive without any change to
 # this repo; a failure means the router image should be rebuilt and
 # redeployed, or the pinned Alpine version bumped. Only HIGH and CRITICAL
-# vulnerabilities with an available fix fail the run.
+# vulnerabilities with an available fix fail the run. Trivy also checks
+# the gateway's crates (embedded by cargo auditable); accepted advisories
+# are listed in .trivyignore.yaml.
 
 name: Rootfs scan
 
 on:
   push:
     branches: [main]
-    paths: [deploy/router/**, .github/workflows/rootfs-scan.yml]
+    paths: [deploy/router/**, .trivyignore.yaml, .github/workflows/rootfs-scan.yml]
   pull_request:
-    paths: [deploy/router/**, .github/workflows/rootfs-scan.yml]
+    paths: [deploy/router/**, .trivyignore.yaml, .github/workflows/rootfs-scan.yml]
   schedule:
     - cron: "43 5 * * 1"
   workflow_dispatch:
@@ -35,3 +37,4 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
+          trivyignores: .trivyignore.yaml

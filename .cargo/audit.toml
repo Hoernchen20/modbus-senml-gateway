@@ -1,6 +1,7 @@
 # cargo-audit configuration. Every ignored advisory needs a reason and a
 # condition for removing it again; re-check these when bumping rumqttc or
-# rumqttd.
+# rumqttd. Advisories affecting the gateway binary must also be added to
+# .trivyignore.yaml (by GHSA ID), which the rootfs scan uses.
 
 [advisories]
 ignore = [

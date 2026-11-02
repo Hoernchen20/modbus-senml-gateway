@@ -18,7 +18,7 @@ FROM rust:1-alpine3.22 AS build
 ARG RUST_TARGET=armv7-unknown-linux-musleabihf
 RUN apk add --no-cache musl-dev zig \
  && rustup target add "$RUST_TARGET" \
- && cargo install --locked cargo-zigbuild
+ && cargo install --locked cargo-zigbuild cargo-auditable@0.7.7
 WORKDIR /src
 # Fetch dependencies in their own layer so code changes don't re-download.
 COPY Cargo.toml Cargo.lock ./
@@ -26,7 +26,10 @@ RUN mkdir src && echo 'fn main() {}' > src/main.rs && touch src/lib.rs \
  && cargo fetch --locked --target "$RUST_TARGET" \
  && rm -r src
 COPY src src
-RUN cargo zigbuild --release --locked --target "$RUST_TARGET" \
+# cargo auditable embeds the dependency list (Cargo.lock) in the binary, so
+# `cargo audit bin`, Trivy or syft can check a binary taken from a router.
+# It wraps the cargo command after it, here cargo zigbuild.
+RUN cargo auditable zigbuild --release --locked --target "$RUST_TARGET" \
  && cp "target/$RUST_TARGET/release/modbus-senml-gateway" /modbus-senml-gateway
 
 # ---- 2. Assemble the rootfs ----
