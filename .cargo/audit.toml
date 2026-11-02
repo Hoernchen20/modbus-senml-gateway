@@ -1,0 +1,23 @@
+# cargo-audit configuration. Every ignored advisory needs a reason and a
+# condition for removing it again; re-check these when bumping rumqttc or
+# rumqttd.
+
+[advisories]
+ignore = [
+    # rustls 0.22.4 is pulled in only by rumqttd (tokio-rustls 0.25), the
+    # MQTT broker used in integration tests. It is a dev-dependency and not
+    # part of the gateway binary. The shipped rustls 0.23 is patched.
+    # Remove once rumqttd moves to rustls >= 0.23.46.
+    "RUSTSEC-2026-0346",
+    "RUSTSEC-2026-0349",
+
+    # rustls-webpki 0.102.8 is a dependency of rumqttc 0.25.1, which only
+    # uses its `webpki::Error` type for a `TlsError` variant (src/tls.rs).
+    # Certificate verification runs through rustls 0.23 and rustls-webpki
+    # 0.103, which are patched. Remove once rumqttc drops or bumps it.
+    "RUSTSEC-2026-0049",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0104",
+    "RUSTSEC-2026-0382",
+]

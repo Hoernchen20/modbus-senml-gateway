@@ -106,7 +106,9 @@ impl MockRtuBus {
         let _ = std::fs::remove_file(&self.path);
         std::os::unix::fs::symlink(slave, &self.path).expect("symlink PTY slave");
 
-        let master = AsyncFd::new(master).expect("register PTY master");
+        // SAFETY: the AsyncFd takes ownership of the PtyMaster, so the fd
+        // stays open and unchanged until the AsyncFd is dropped.
+        let master = unsafe { AsyncFd::register(master) }.expect("register PTY master");
         self.responder = Some(tokio::spawn(serve(master, self.state.clone())));
     }
 }
