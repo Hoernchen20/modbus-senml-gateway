@@ -7,7 +7,8 @@ set -eu
 cd "$(dirname "$0")/../.."
 
 image=modbus-gateway-router-build
-docker build -f deploy/router/Dockerfile -t "$image" "$@" .
+docker build -f deploy/router/Dockerfile -t "$image" \
+    --build-arg UPGRADE_STAMP="$(date -u +%Y-%m-%d)" "$@" .
 
 mkdir -p dist
 container=$(docker create "$image")

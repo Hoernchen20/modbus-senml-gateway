@@ -56,6 +56,10 @@ RUN set -e; \
 
 # apk uses the rootfs's own repositories, keys and arch (armv7). Upgrade
 # first to pick up security fixes released after the minirootfs.
+# A new UPGRADE_STAMP invalidates the cached result of this step (and the
+# ones after it); build.sh sets it to the current date, so packages are
+# never older than the day of the build.
+ARG UPGRADE_STAMP
 RUN apk --root /rootfs --no-cache --no-scripts upgrade \
  && if [ -n "$PACKAGES" ]; then apk --root /rootfs --no-cache --no-scripts add $PACKAGES; fi
 
