@@ -1,0 +1,26 @@
+# Dependabot version updates. Security updates for vulnerable crates are
+# opened separately by GitHub once Dependabot alerts and security updates
+# are enabled in the repository settings.
+#
+# Docker images are not covered: dev/ uses floating tags (rust:1-alpine,
+# alpine:3) that never need a bump, and the router's Alpine version is
+# pinned in deploy/router/Dockerfile in three places (ALPINE_VERSION and
+# both FROM lines) that must be updated together. Bump it by hand.
+
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # One PR for minor and patch updates, one PR per major update.
+      # Dependabot classifies by version number, so 0.x minor bumps
+      # (breaking in Cargo, e.g. tokio-modbus 0.17 -> 0.18) land in the
+      # group too; split them out if the group PR fails to build.
+      cargo-compatible:
+        applies-to: version-updates
+        update-types: [minor, patch]
+      cargo-security:
+        applies-to: security-updates
+        patterns: ["*"]
