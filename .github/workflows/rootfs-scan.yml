@@ -1,0 +1,37 @@
+# Builds the router rootfs and scans its Alpine packages with Trivy. Runs
+# weekly because Alpine fixes (and new CVEs) arrive without any change to
+# this repo; a failure means the router image should be rebuilt and
+# redeployed, or the pinned Alpine version bumped. Only HIGH and CRITICAL
+# vulnerabilities with an available fix fail the run.
+
+name: Rootfs scan
+
+on:
+  push:
+    branches: [main]
+    paths: [deploy/router/**, .github/workflows/rootfs-scan.yml]
+  pull_request:
+    paths: [deploy/router/**, .github/workflows/rootfs-scan.yml]
+  schedule:
+    - cron: "43 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trivy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: deploy/router/build.sh
+      - run: mkdir rootfs && tar xzf dist/alpine-rootfs.tgz -C rootfs
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: rootfs
+          scan-ref: rootfs
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
