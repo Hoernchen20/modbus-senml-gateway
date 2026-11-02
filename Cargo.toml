@@ -8,7 +8,6 @@ rumqttc = { version = "0.25.1", default-features = false, features = ["use-rustl
 # Direct dep only to select the ring crypto provider for rumqttc's rustls
 # (its default pulls in aws-lc-rs, a heavy C/cmake build for musl targets).
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-rustls-pemfile = "2.2.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.20"

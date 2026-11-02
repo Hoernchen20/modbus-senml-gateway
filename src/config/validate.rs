@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::CertificateDer;
 use thiserror::Error;
 
 use super::schema::{Config, Transport};
@@ -85,7 +87,7 @@ pub enum ValidationError {
     CaCertUnparseable {
         path: String,
         #[source]
-        source: std::io::Error,
+        source: rustls::pki_types::pem::Error,
     },
 }
 
@@ -228,8 +230,7 @@ fn validate_ca_cert(path: &str) -> Result<(), ValidationError> {
         path: path.to_string(),
         source: e,
     })?;
-    let mut reader = std::io::BufReader::new(bytes.as_slice());
-    let certs = rustls_pemfile::certs(&mut reader)
+    let certs = CertificateDer::pem_slice_iter(&bytes)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| ValidationError::CaCertUnparseable {
             path: path.to_string(),
@@ -492,6 +493,27 @@ mod tests {
 
         let err = validate(&config).unwrap_err();
         assert!(matches!(err, ValidationError::CaCertEmpty { .. }));
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn malformed_pem_ca_cert_file_is_rejected() {
+        let path = std::env::temp_dir().join(format!(
+            "modbus-gw-test-malformed-ca-{}.pem",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            b"-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+
+        let mut config = valid_config();
+        config.mqtt.ca_cert_path = path.display().to_string();
+
+        let err = validate(&config).unwrap_err();
+        assert!(matches!(err, ValidationError::CaCertUnparseable { .. }));
 
         std::fs::remove_file(&path).ok();
     }
