@@ -13,8 +13,10 @@ CONFIG=$CONFIG_DIR/config.toml
 # match mqtt.password_env in the config).
 ENV_FILE=$CONFIG_DIR/gateway.env
 RESPAWN_DELAY=5
-# stderr of the gateway; it only writes there while /dev/log is missing.
-ERROR_LOG=/var/log/modbus-gateway.err
+# stderr of the gateway: errors before logging is up, panics, and messages
+# that /dev/log can't take. The router's rootfs is read-only, so this has to
+# be on the /tmp tmpfs. That is RAM, so each start rotates the file.
+ERROR_LOG=/tmp/modbus-gateway.err
 
 log() {
 	logger -t run-gateway -p daemon.err "$1" 2>/dev/null || echo "$1" >&2
@@ -35,7 +37,12 @@ while [ -z "$stopping" ]; do
 			. "$ENV_FILE"
 			set +a
 		fi
-		"$BIN" "$CONFIG" 2>>"$ERROR_LOG" &
+		mv -f "$ERROR_LOG" "$ERROR_LOG.old" 2>/dev/null
+		# The shell doesn't run a command whose redirect fails, so a log
+		# file that can't be opened must not reach the line below.
+		err=$ERROR_LOG
+		( : >"$err" ) 2>/dev/null || err=/dev/null
+		"$BIN" "$CONFIG" 2>>"$err" &
 		child=$!
 		wait "$child"
 		status=$?

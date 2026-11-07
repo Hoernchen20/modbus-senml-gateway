@@ -94,9 +94,21 @@ background (`&`) or be a self-daemonizing command.
 `run-gateway` loads `/dev/container_config/files/gateway.env`, runs
 `/usr/local/bin/modbus-senml-gateway /dev/container_config/files/config.toml`
 and restarts it 5 s after any exit. SIGTERM is forwarded to the gateway, which
-then shuts down gracefully (see [../README.md](../README.md)). Gateway
-stderr, which is only used while `/dev/log` is missing, goes to
-`/var/log/modbus-gateway.err`.
+then shuts down gracefully (see [../README.md](../README.md)). The gateway's
+stderr goes to `/tmp/modbus-gateway.err`, because the router mounts the rootfs
+read-only and `/tmp` is the writable tmpfs. It holds config errors, panics and
+any messages `/dev/log` couldn't take. Each start moves the previous file to
+`modbus-gateway.err.old`.
+
+## Logs
+
+The router runs its own `syslogd -C100`, which keeps logs in a RAM buffer, so
+`/var/log` stays empty. Read them with `logread`:
+
+```sh
+logread | grep -E 'run-gateway|mqtt'
+cat /tmp/modbus-gateway.err
+```
 
 The OpenRC files in [../openrc/](../openrc/) are for a regular Alpine LXC
 container with OpenRC. The router image doesn't use them.
