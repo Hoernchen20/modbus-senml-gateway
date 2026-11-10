@@ -52,7 +52,8 @@ log_level = "info"
 
 # File where a short plain-text connectivity summary is written (MQTT state
 # and one line per connection). It is written to "<path>.tmp" and then
-# renamed, so the directory must be writable by the service user.
+# renamed, so the directory must be writable by the service user. The file
+# is created with mode 0600 (readable by the service user only).
 # Optional. Default: "/dev/container_config/status". Output is capped at
 # 2048 bytes.
 status_file_path = "/dev/container_config/status"

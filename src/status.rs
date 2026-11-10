@@ -1,7 +1,8 @@
 use std::ffi::OsString;
-use std::fs::{self, File};
+use std::fs::{self, OpenOptions};
 use std::future::Future;
 use std::io::{self, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -296,9 +297,23 @@ fn truncate(mut s: String) -> String {
 
 /// Writes `<path>.tmp` in the same directory, then renames it over `path`,
 /// so readers only ever see a complete old or new file.
+///
+/// The temp file is always created fresh (`O_CREAT | O_EXCL`), which never
+/// follows a symlink: a link planted at `<path>.tmp` can't redirect the write
+/// to another file. A leftover from a crash (or such a link) is removed
+/// first; if one reappears in between, the write fails instead.
 pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
     let tmp = tmp_path(path);
-    let mut file = File::create(&tmp)?;
+    match fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)?;
     file.write_all(contents)?;
     // The target may be flash: make the data durable before the rename
     // publishes it, so a power cut can't leave an empty file behind.
@@ -619,6 +634,33 @@ mod tests {
 
         assert!(reads.load(Ordering::Relaxed) > 0);
         assert!(!tmp_path(&path).exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn atomic_write_replaces_leftover_tmp_without_following_symlinks() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = temp_dir("symlink");
+        let path = dir.join("status");
+        let victim = dir.join("victim");
+        fs::write(&victim, "keep me").unwrap();
+        symlink(&victim, tmp_path(&path)).unwrap();
+
+        write_atomic(&path, b"status").unwrap();
+
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep me");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "status");
+        let meta = fs::symlink_metadata(&path).unwrap();
+        assert!(meta.file_type().is_file());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+
+        // A plain leftover from a crash mid-write is replaced too.
+        fs::write(tmp_path(&path), "stale").unwrap();
+        write_atomic(&path, b"fresh").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "fresh");
+        assert!(!tmp_path(&path).exists());
+
         fs::remove_dir_all(&dir).unwrap();
     }
 

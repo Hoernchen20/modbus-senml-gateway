@@ -42,16 +42,6 @@ Publish a boolean record per device in every aggregation window, e.g.
 
 From `security-review.txt`. Finding numbers refer to that file.
 
-### Worth doing
-
-#### Safer status file temp write (finding 3)
-
-`write_atomic` creates a fixed `<path>.tmp` with `File::create`, which follows
-symlinks. Cheap to fix: open with `O_NOFOLLOW` and mode `0o600`, and delete a
-leftover `.tmp` first (`create_new` alone would get stuck after a crash). The
-practical risk in the router container is low (only the gateway runs there),
-but the change is small.
-
 ### Nice to have
 
 - **Warn when `tls = false`** (finding 1): log a clear warning at startup that

@@ -126,7 +126,8 @@ connection rs485-bus1: up, 1/2 devices ok (tempsensor2: timeout since 14:28:15Z)
 The file is rewritten shortly after any state change and at least every
 `status_heartbeat_secs`, so an old `updated:` timestamp means the gateway
 has stopped working. Writes are atomic (write to a temporary file, then
-rename) and the file never exceeds 2048 bytes.
+rename) and the file never exceeds 2048 bytes. It is created with mode
+0600, so only the service user (and root) can read it.
 
 ### Logs
 
