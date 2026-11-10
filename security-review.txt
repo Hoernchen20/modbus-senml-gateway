@@ -1,0 +1,448 @@
+Modbus2SenML gateway - security review of src/
+================================================
+
+Date:    2026-11-08
+Scope:   All Rust sources under src/ (config, modbus, mqtt, aggregator, senml,
+         status, syslog, main/lib). Deployment files were only consulted for
+         context.
+Method:  Manual source review, cargo audit, cargo tree, and inspection of the
+         relevant crate sources (rumqttc 0.25.1, tokio-modbus 0.17.0).
+Result:  No source files were modified. This report is the only new file.
+
+Severity legend
+---------------
+High    - Remotely triggerable compromise or direct secret exposure.
+Medium  - Remote/local denial of service, data-integrity failure, or a local
+          attack that becomes serious depending on deployment permissions.
+Low     - Hardening issue or attack requiring control of configuration/files.
+Info    - Observation, accepted risk, or supply-chain note.
+
+Summary
+-------
+1.  MEDIUM  MQTT TLS is optional; broker credentials/telemetry go plaintext when tls=false
+2.  MEDIUM  Short Modbus read responses can panic decode (remote DoS of a connection)
+3.  MEDIUM  Status file temp write follows symlinks; predictable temp name
+4.  MEDIUM  Config validation gaps allow busy loops, flash wear, and startup panics
+5.  LOW     Non-finite Modbus/scale values poison aggregates and emit invalid SenML
+6.  LOW     MQTT topics built from unvalidated IDs (topic/wildcard injection)
+7.  LOW     Log and status-file line injection via unsanitized config IDs
+8.  LOW     Arbitrary file read/write and device open via config paths (trust boundary)
+9.  LOW     TOCTOU on the MQTT CA certificate file
+10. LOW     MQTT password kept unzeroized; rumqttc Debug prints credentials
+11. LOW     Duplicate connection/device/point IDs are not rejected
+12. INFO    Modbus TCP/RTU is unauthenticated and unencrypted (accepted risk)
+13. INFO    MQTT status topic is retained; broker-side ACLs are required
+14. INFO    TLS 1.2 is enabled; no revocation checking
+15. INFO    Dependency audit result and ignored advisories
+16. INFO    Config silently ignores unknown keys
+
+
+1. MEDIUM - MQTT TLS is optional; plaintext credentials/telemetry
+---------------------------------------------------------------
+Location:
+  src/mqtt.rs:78-102          build_mqtt_options(); TLS only when cfg.tls
+  src/config/schema.rs:42     tls is a plain bool
+  src/config/validate.rs      no requirement that tls == true
+  config.example.toml:85-95   documents that false is allowed
+
+Description:
+  MQTT username/password and all SenML telemetry are sent over plain TCP when
+  `tls = false`. The username/password are always configured, so a plaintext
+  configuration sends the broker password in the clear on every CONNECT.
+
+Impact:
+  A network attacker on the path to the broker can capture the MQTT password
+  (and potentially reuse it elsewhere), read telemetry, inject or modify
+  telemetry, and impersonate the broker. The gateway's own CA validation is
+  good when TLS is on, but none of it applies when tls=false.
+
+Recommendation:
+  Reject (or at minimum loudly warn about) tls=false when credentials are
+  configured. Consider making TLS the only supported mode and requiring an
+  explicit `allow_insecure_plaintext = true` opt-in if plaintext must remain
+  possible. Document that plaintext mode must only be used on a trusted,
+  isolated network.
+
+
+2. MEDIUM - Short Modbus read responses can panic decode
+--------------------------------------------------------
+Location:
+  src/modbus/decode.rs:18-38  unchecked words[idx] / words[idx + 1]
+  src/modbus/poller.rs:138-152, 215-220
+  Dependency behavior: tokio-modbus 0.17.0 client/mod.rs:181-203 only
+  debug_assert_eq!(words.len(), cnt) (compiled out in release builds).
+
+Description:
+  `decode()` indexes the response word slice using configured offsets without
+  checking its length. A malicious or malfunctioning Modbus server can answer
+  a valid read PDU with fewer registers than requested (the response carries
+  its own byte count). In a release build the only length check in tokio-modbus
+  is a debug_assert, so the slice can be shorter than block.count and the
+  indexing panics.
+
+Impact:
+  One connection can be driven into a panic/respawn loop, losing telemetry and
+  flooding logs. The supervisor (src/modbus/supervisor.rs) catches the panic so
+  the whole process does not exit, and the release profile intentionally does
+  not use panic=abort. If panic=abort were ever enabled, this would become a
+  process-wide remote DoS.
+
+Recommendation:
+  Before decoding, require `words.len() == block.count` (or at least
+  `words.len() >= offset + width` for every point) and classify a mismatch as
+  a protocol error for that device/tick. Use `words.get(idx)` / `get(idx..)`
+  in decode as a second line of defense. Add a test with a short response.
+
+
+3. MEDIUM - Status file temp write follows symlinks; predictable temp name
+--------------------------------------------------------------------------
+Location:
+  src/status.rs:299-313  write_atomic() / tmp_path()
+  src/config/schema.rs:25-27  default /dev/container_config/status
+
+Description:
+  The atomic write creates a predictable `<path>.tmp` with `File::create()`,
+  which follows symlinks and truncates the target, then renames it over the
+  real path. If the status directory is writable by a less-privileged user or
+  another container, that user can pre-create `<status>.tmp` as a symlink to
+  an arbitrary file. The gateway (root by default in the OpenRC unit) will
+  then truncate/overwrite that file.
+
+Impact:
+  Local privilege escalation / arbitrary file clobbering under a vulnerable
+  deployment (writable status directory). The final `rename` replaces a
+  symlink at the destination rather than following it, so the temp path is the
+  exploitable part. The file is also created with default permissions
+  (typically 0644 after umask), exposing gateway/broker/device names.
+
+Recommendation:
+  Create the temp file with `OpenOptions::new().write(true).create_new(true)`,
+  `mode(0o600)` on Unix, and `O_NOFOLLOW` where available; use a random suffix
+  or a per-process temp name. Ensure the status directory is owned by the
+  gateway user and not writable by others. Prefer a pre-opened directory/file
+  descriptor for the status location.
+
+
+4. MEDIUM - Config validation gaps: busy loops, flash wear, startup panics
+--------------------------------------------------------------------------
+Location:
+  src/config/schema.rs       status_debounce_secs, status_heartbeat_secs,
+                             io_timeout_ms, reconnect_backoff_*, keep_alive_secs,
+                             aggregation_window_secs, poll_interval_secs, scale
+  src/config/validate.rs     validates only some zero/positive cases
+  src/status.rs:356-383      heartbeat scheduling
+  src/modbus/poller.rs:34-37, 172-178
+  src/aggregator.rs:76-77, 107-112
+  src/mqtt.rs:80
+
+Description and impact:
+  a) `status_heartbeat_secs = 0`: `next_heartbeat = Instant::now() + 0`, so the
+     status writer rewrites the file as fast as the filesystem allows. This is
+     a tight write loop causing CPU load, disk I/O, and flash wear.
+  b) `reconnect_backoff_max_secs = 0` (or both backoff values 0): after one
+     failure `Backoff::wait()` sleeps 0, producing a tight reconnect loop
+     against the Modbus peer. The same config feeds the supervisor backoff in
+     src/lib.rs:97-100.
+  c) `io_timeout_ms = 0`: every connect/read attempt times out immediately, so
+     the connection never polls (combined with b, it becomes a tight loop).
+  d) Unbounded durations: an absurd `aggregation_window_secs` makes
+     `next_boundary()` return a near-u64::MAX wait and `Instant::now() + wait`
+     panics on overflow. Very large `poll_interval_secs` / timeouts can hit the
+     same Instant overflow path.
+  e) `keep_alive_secs > 65535` is silently truncated by rumqttc's
+     `as u16` (eventloop.rs:490), turning the configured keep-alive into a
+     different value (65536 becomes 0 = disabled).
+  f) `status_debounce_secs = 0` writes immediately (minor).
+  g) `scale` is not checked for NaN/Infinity (TOML allows `nan`/`inf`).
+
+Recommendation:
+  Validate all durations: nonzero where required, sane upper bounds, and
+  `reconnect_backoff_min_secs <= reconnect_backoff_max_secs`. Enforce
+  `keep_alive_secs <= 65535`. Validate `scale.is_finite()`. Reject empty
+  broker_host/client_id/username/topic_template and malformed IDs. Add tests
+  for zero and extreme values.
+
+
+5. LOW - Non-finite values poison aggregates and emit invalid SenML
+-------------------------------------------------------------------
+Location:
+  src/modbus/decode.rs:9-13      raw * scale, f32::from_bits
+  src/aggregator.rs:114-149      sum += value, mean = sum / count
+  src/senml.rs:17, 39            v: f64 serialized by serde_json
+  src/config/validate.rs         no finite-scale check
+
+Description:
+  A device can return IEEE-754 NaN/Inf (especially as F32), and a config can
+  use `scale = nan`/`inf`. One NaN reading makes the window sum NaN, so the
+  published mean is NaN. serde_json serializes non-finite f64 values as
+  `null`, producing SenML records whose `v` is not a number.
+
+Impact:
+  A single bad sample silently destroys that point's aggregate for the whole
+  window and produces schema-invalid SenML that downstream consumers may
+  reject or store incorrectly. This is a data-integrity issue, not host
+  compromise, and a network attacker on unauthenticated Modbus can already
+  inject values.
+
+Recommendation:
+  Drop or flag non-finite samples after scaling (and before accumulation),
+  validate `scale.is_finite()`, and consider explicitly representing sensor
+  faults rather than publishing nulls. Add tests for NaN/Inf inputs.
+
+
+6. LOW - MQTT topics built from unvalidated IDs
+-----------------------------------------------
+Location:
+  src/mqtt.rs:48-56     status_topic() and batch_topic()
+  src/config/schema.rs  gateway.id, device.id, topic_template, client_id
+  src/config/validate.rs  no ID/topic validation
+
+Description:
+  `batch_topic()` substitutes `{device}` with a configured device ID, and
+  `status_topic()` embeds the gateway ID, without rejecting `/`, `#`, `+`,
+  control characters, or excessive lengths. IDs containing `/` can publish
+  outside the intended namespace; MQTT wildcards produce invalid topics or
+  surprising matches. A topic_template without `{device}` makes every device
+  publish to the same topic.
+
+Impact:
+  Topic confusion and potential bypass of prefix-based broker ACLs if device
+  IDs are generated from an external inventory. Leftover wildcards can cause
+  broker disconnects. Configuration-controlled, so this is Low.
+
+Recommendation:
+  Restrict IDs to a safe charset (e.g. [A-Za-z0-9_.-]), reject MQTT
+  wildcard/reserved characters and control characters, enforce length limits,
+  and require topic_template to contain exactly one `{device}` placeholder.
+
+
+7. LOW - Log and status-file line injection via unsanitized IDs
+----------------------------------------------------------------
+Location:
+  src/syslog.rs:43-55, 163-178   tag and message formatted verbatim
+  src/status.rs:223-271          IDs and reasons rendered verbatim
+  src/main.rs:36                 gateway ID used as syslog tag
+
+Description:
+  Gateway/connection/device/point IDs come from config and are written into
+  RFC 3164 syslog lines and the status file without replacing newlines or
+  other control characters. A crafted ID can forge additional log/status
+  lines and confuse monitoring or log parsers.
+
+Impact:
+  Log/status spoofing if an attacker can influence configuration. No remote
+  strings are currently interpolated into these lines (exception text is from
+  fixed enum formatting), so impact is limited.
+
+Recommendation:
+  Reject control characters in all configuration IDs, or escape newlines and
+  non-printables before formatting. Prefer structured logging where possible.
+
+
+8. LOW - Arbitrary file/device access through configuration paths
+------------------------------------------------------------------
+Location:
+  src/config/validate.rs:228-245   reads ca_cert_path
+  src/mqtt.rs:93-101               reads ca_cert_path again
+  src/status.rs:299-307            writes status_file_path
+  src/modbus/poller.rs:84-99       opens serial_port
+  src/main.rs:16-22                config path from argv
+
+Description:
+  All file and device paths are taken from the config and used directly. The
+  config file's ownership/permissions are not checked. If a less-trusted
+  principal can modify the config (or its paths), the gateway can be made to
+  read arbitrary certificate files, truncate/overwrite arbitrary files via the
+  status path, or open arbitrary character/block devices via serial_port.
+  OpenRC runs the service as root:root by default
+  (deploy/openrc/modbus-gateway:21).
+
+Impact:
+  This is mostly a trust-boundary issue. Combined with finding 3 (writable
+  status directory), it becomes a concrete local privilege-escalation path.
+
+Recommendation:
+  Document that the config and all referenced paths must be root-owned and not
+  writable by others; verify ownership/mode at startup if practical. Run as a
+  dedicated unprivileged user (with dialout/device access only as needed)
+  instead of root. Avoid accepting a config path from an untrusted caller.
+
+
+9. LOW - TOCTOU on the MQTT CA certificate file
+-----------------------------------------------
+Location:
+  src/config/validate.rs:223, 228-245   validation read
+  src/mqtt.rs:93-101                    second read used for TLS
+
+Description:
+  The CA file is read and parsed during config validation and read again when
+  building the TLS transport. If the file or its directory is writable by an
+  attacker between those operations, the second read can trust a different CA.
+
+Impact:
+  An attacker with write access to the CA path could substitute their own CA
+  and MITM the TLS connection. Requires filesystem write access to a
+  root-owned location in a sound deployment.
+
+Recommendation:
+  Read the CA bytes once and pass them to build_mqtt_options, or re-validate
+  the exact bytes that are installed into the trust store. Enforce ownership
+  and mode on the CA file/directory.
+
+
+10. LOW - MQTT password handling: unzeroized memory and Debug leak
+-------------------------------------------------------------------
+Location:
+  src/mqtt.rs:64-68, 78-81   read_password() -> String -> set_credentials
+  src/lib.rs:57-58           password passed by value
+  rumqttc 0.25.1:
+    src/lib.rs:917-937                  MqttOptions Debug includes credentials
+    src/mqttbytes/v4/connect.rs:210-214 Login derives Debug with password
+
+Description:
+  The password is copied through several ordinary Strings and is not zeroized
+  on drop. rumqttc's Debug representation of MqttOptions includes the Login
+  struct and therefore the plaintext password. The current code does not log
+  the options, but any future `debug!("{opts:?}")` would leak the secret. The
+  environment variable is also visible to same-UID processes and root.
+
+Impact:
+  Secret exposure through core dumps, memory inspection, accidental debug
+  logging, or same-user process access. Low in the current code because no
+  logging of options exists.
+
+Recommendation:
+  Wrap the password in a zeroizing/secret type, avoid deriving or printing
+  options containing credentials, and consider systemd credentials or a
+  root-only file read instead of the environment. Keep the service UID
+  isolated from untrusted processes.
+
+
+11. LOW - Duplicate connection/device/point IDs are not rejected
+-----------------------------------------------------------------
+Location:
+  src/config/validate.rs      checks duplicate unit_id and serial_port only
+  src/aggregator.rs:42-60     HashMap<PointId, PointAgg> overwrites duplicates
+  src/status.rs:191-214       find() uses the first matching ID
+
+Description:
+  Duplicate connection IDs are not rejected. Duplicate device IDs (within or
+  across connections) and duplicate point names within a device are also not
+  rejected. The aggregator keys state by (device.id, point.name), so
+  duplicates silently merge unrelated readings into one point. Status events
+  for duplicate connection/device IDs are all applied to the first match.
+
+Impact:
+  Misconfiguration can silently mix telemetry from different devices or
+  misreport health. Not attacker-triggerable without config control, but it is
+  a data-integrity trap.
+
+Recommendation:
+  Validate uniqueness of connection IDs, device IDs (at least per connection,
+  preferably globally), and point names per device; clarify the intended
+  scope. Reject duplicates at startup with a clear error.
+
+
+12. INFO - Modbus TCP/RTU is unauthenticated and unencrypted (accepted risk)
+---------------------------------------------------------------------------
+Location:
+  src/modbus/poller.rs:67-101, 138-152
+
+  The Modbus protocol has no authentication or encryption in the modes used
+  here. Anyone who can reach the TCP port or the serial bus can spoof devices,
+  alter readings, or cause timeouts. This is inherent to classic Modbus and
+  appears to be an accepted design assumption. Mitigate with network
+  segmentation/firewalls, physically protected RS-485, and gateway ACLs.
+
+
+13. INFO - Retained MQTT status topic relies on broker ACLs
+-----------------------------------------------------------
+Location:
+  src/mqtt.rs:48-50, 79-88, 150-158, 187
+
+  The retained `telemetry/<gateway>/status` (also the LWT topic) can be
+  overwritten by any broker client with publish permission. Use broker-side
+  ACLs that restrict each gateway to its own topics and unique credentials.
+
+
+14. INFO - TLS 1.2 enabled; no revocation checking
+--------------------------------------------------
+Location:
+  Cargo.toml (rustls feature "tls12")
+  src/mqtt.rs:90-102
+
+  TLS 1.2 is allowed in addition to TLS 1.3. This is not a vulnerability with
+  modern cipher suites, but TLS 1.3-only is a reasonable hardening choice if
+  the broker supports it. The trust store is CA-only and no CRL/OCSP checking
+  is performed; document that revocation relies on certificate lifetime.
+
+
+15. INFO - Dependency audit and ignored advisories
+--------------------------------------------------
+Commands run:
+  cargo audit  (database last-updated 2026-11-06)
+  cargo tree -i rustls@0.22.4
+  cargo tree -i rustls-webpki@0.102.8
+  cargo tree -i rustls@0.23.46
+
+Result:
+  cargo audit found 0 vulnerabilities and 1 unmaintained-crate warning:
+    - RUSTSEC-2025-0134: rustls-pemfile 2.2.0 is unmaintained (pulled by
+      rumqttc).
+
+  Seven advisories are ignored in .cargo/audit.toml:
+    - RUSTSEC-2026-0346 / -0349 (rustls): rustls 0.22.4 is only pulled by
+      rumqttd, a dev-dependency. Shipped rustls is 0.23.46, which is patched.
+      Verified with cargo tree.
+    - RUSTSEC-2026-0049 / -0098 / -0099 / -0104 / -0382 (rustls-webpki):
+      rustls-webpki 0.102.8 is in the shipped dependency graph through
+      rumqttc, but rumqttc uses only its `webpki::Error` type
+      (rumqttc src/tls.rs:42). Certificate verification uses rustls 0.23.46
+      with rustls-webpki 0.103.16, which is patched. Verified with cargo tree.
+
+Assessment:
+  The justifications are reasonable today. rustls-webpki 0.102.8 still appears
+  in the binary's dependency list and may be flagged by scanners; keep
+  .trivyignore.yaml in sync (it currently lists only the four webpki IDs, which
+  is correct for the binary). Re-check all ignores when bumping rumqttc /
+  rumqttd. The repo already runs cargo audit and Trivy in CI
+  (.github/workflows/audit.yml, rootfs-scan.yml), which is good.
+
+
+16. INFO - Config silently ignores unknown keys
+-----------------------------------------------
+Location:
+  src/config/schema.rs  (no #[serde(deny_unknown_fields)])
+
+  A typo in an optional field (e.g. status_file_path) silently falls back to
+  the default, potentially writing to an unexpected location. Required fields
+  are caught by serde. Consider `#[serde(deny_unknown_fields)]` and logging an
+  effective, secret-redacted config summary at startup.
+
+
+Notable good practices observed
+-------------------------------
+- No `unsafe` blocks in src/.
+- Bounded channels with non-blocking try_send for readings, status events, and
+  MQTT publish queue; overload drops data instead of unbounded memory growth.
+- MQTT TLS pins only the configured CA (no system roots, no client cert), and
+  the CA PEM is validated at startup.
+- Broker password is not stored in the config file; it is read from an
+  environment variable and never logged by current code.
+- Status file writes are fsynced and atomically renamed (apart from the temp-
+  path issue in finding 3), and output is size-capped at complete lines.
+- Modbus block sizes, point bounds/overlaps, unit-id duplicates, serial
+  settings, QoS, and log level are validated.
+- Per-connection supervisor isolates panics; panic=abort is intentionally not
+  enabled.
+- syslog socket is nonblocking with backoff and a fallback, and mutex poisoning
+  is handled.
+- CI runs cargo audit and Trivy scans.
+
+Assumptions
+-----------
+- The config file and referenced paths are controlled by a trusted operator.
+- Classic Modbus is deployed on a trusted/segmented network or serial bus.
+- The broker enforces authentication and per-gateway topic ACLs.
+- Running the service as root (OpenRC default) is a deployment hardening gap,
+  not a code bug, but it raises the impact of findings 3 and 8.

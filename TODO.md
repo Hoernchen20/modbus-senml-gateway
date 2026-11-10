@@ -37,3 +37,100 @@ Publish a boolean record per device in every aggregation window, e.g.
   of a bool, to catch flaky devices. Not needed for now.
 - Check how this works with `majority_unit` (the status record has no unit) and
   update the tests and `config.example.toml`/docs.
+
+## Security review follow-ups (2026-11-08)
+
+From `security-review.txt`. Finding numbers refer to that file.
+
+### Worth doing
+
+#### Short Modbus responses must not panic (finding 2)
+
+`decode()` indexes `words[idx]` / `words[idx + 1]` without checking the
+length. tokio-modbus only checks the response length with `debug_assert`, so
+in a release build a faulty or malicious device can send fewer registers than
+requested, and the connection task panics and respawns in a loop.
+
+- In `poller.rs`, treat `words.len() != block.count` as a protocol error for
+  that device/tick (`DeviceProblem`). Don't decode it.
+- Use `words.get(..)` in `decode.rs` as a second safeguard.
+- Add a test with a short response.
+
+#### Tighter config validation (findings 4, 5g)
+
+Some config values are accepted but cause tight loops, flash wear or panics:
+
+- `status_heartbeat_secs = 0`: rewrites the status file in a tight loop (flash!).
+- `reconnect_backoff_max_secs = 0`: tight reconnect loop. Also require
+  `min <= max`.
+- `io_timeout_ms = 0`: every request times out at once.
+- Very large `aggregation_window_secs` / `poll_interval_secs` / timeouts:
+  `Instant::now() + d` overflows and panics. Set reasonable upper limits.
+- `keep_alive_secs > 65535` gets truncated by rumqttc (`65536` turns into `0`,
+  which disables keep-alive).
+- `scale` must be finite (TOML accepts `nan`/`inf`).
+- Reject empty `broker_host`, `client_id`, `username` and `topic_template`.
+- Add a test for each case: zero and extreme values.
+
+#### Drop non-finite readings (finding 5)
+
+A single NaN/Inf (e.g. an F32 register with a fault value) makes the whole
+window's mean NaN, and serde_json writes it as `"v": null`, which is invalid
+SenML. Drop non-finite values after scaling, before they reach the
+aggregator, with a rate-limited warning. Tests for NaN/Inf. Possibly ties in
+with the device status record above.
+
+#### Validate IDs: charset and uniqueness (findings 6, 7, 11)
+
+All checks belong in `validate.rs`:
+
+- Gateway, connection, device and point IDs must match `[A-Za-z0-9_.-]+`, with
+  a length limit. That prevents `/`, `#`, `+` in MQTT topics and newlines in
+  syslog and the status file.
+- `topic_template` must contain exactly one `{device}`.
+- Connection IDs and device IDs must be globally unique, and point names unique
+  per device. Today duplicates silently merge their readings in the aggregator.
+
+#### Warn about unknown config keys (finding 16)
+
+A typo in an optional key (e.g. `status_file_pth`) silently falls back to the
+default. `#[serde(deny_unknown_fields)]` doesn't work on `ConnectionConfig`,
+because it uses `#[serde(flatten)]` with the internally tagged `Transport`.
+Options: deny it on the other structs only, or collect ignored keys with the
+`serde_ignored` crate and warn or fail at startup.
+
+#### Safer status file temp write (finding 3)
+
+`write_atomic` creates a fixed `<path>.tmp` with `File::create`, which follows
+symlinks. Cheap to fix: open with `O_NOFOLLOW` and mode `0o600`, and delete a
+leftover `.tmp` first (`create_new` alone would get stuck after a crash). The
+practical risk in the router container is low (only the gateway runs there),
+but the change is small.
+
+### Nice to have
+
+- **Warn when `tls = false`** (finding 1): log a clear warning at startup that
+  the password and telemetry go out unencrypted. Don't reject it, because the
+  dev setup / isolated networks need plaintext.
+- **Read the CA file only once** (finding 9): validation and
+  `build_mqtt_options` each read it. Pass the bytes along. A small cleanup, the
+  real risk is minimal.
+- **Password as a secret type** (finding 10): `zeroize`/`secrecy` for the
+  password, and never print `MqttOptions` with `{:?}` (the rumqttc Debug output
+  includes the password).
+- **Don't run as root** (finding 8): in the router container probably not
+  practical (`mknod /dev/ttyS1` in `start.sh` needs root; you could drop
+  privileges afterwards). For OpenRC, a dedicated user plus `dialout` would be
+  doable. Document that the config and the paths it points to must be owned by
+  root.
+- **TLS 1.3 only** (finding 14): disable the rustls `tls12` feature if every
+  broker supports 1.3.
+
+### No action (accepted risk / already fine)
+
+- Finding 12: Modbus has no authentication. This is a design assumption,
+  covered by network segmentation.
+- Finding 13: the retained status topic depends on broker ACLs. Note it in the
+  deploy docs.
+- Finding 15: the audit ignores are justified. Re-check `.cargo/audit.toml`
+  and `.trivyignore.yaml` after every rumqttc/rumqttd bump.
