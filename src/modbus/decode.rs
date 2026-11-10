@@ -1,40 +1,51 @@
 use crate::config::schema::{BlockConfig, DataType, WordOrder};
 
+/// Decodes every point of `block` from its response registers. The poller
+/// rejects responses whose length doesn't match `block.count`; as a second
+/// line of defense a point whose registers are missing is skipped here
+/// instead of panicking.
 pub fn decode(block: &BlockConfig, words: &[u16]) -> Vec<(String, f64)> {
     block
         .points
         .iter()
-        .map(|p| {
-            let raw = extract_raw(words, p.offset, p.data_type, block.word_order);
+        .filter_map(|p| {
+            let raw = extract_raw(words, p.offset, p.data_type, block.word_order)?;
             let mut value = raw * p.scale;
             if p.absolute {
                 value = value.abs();
             }
-            (p.name.clone(), value)
+            Some((p.name.clone(), value))
         })
         .collect()
 }
 
-fn extract_raw(words: &[u16], offset: u16, data_type: DataType, word_order: WordOrder) -> f64 {
+fn extract_raw(
+    words: &[u16],
+    offset: u16,
+    data_type: DataType,
+    word_order: WordOrder,
+) -> Option<f64> {
     let idx = offset as usize;
-    match data_type {
-        DataType::U16 => words[idx] as f64,
-        DataType::I16 => words[idx] as i16 as f64,
-        DataType::U32 => combine_u32(words, idx, word_order) as f64,
-        DataType::I32 => combine_u32(words, idx, word_order) as i32 as f64,
-        DataType::F32 => f32::from_bits(combine_u32(words, idx, word_order)) as f64,
-    }
+    Some(match data_type {
+        DataType::U16 => *words.get(idx)? as f64,
+        DataType::I16 => *words.get(idx)? as i16 as f64,
+        DataType::U32 => combine_u32(words, idx, word_order)? as f64,
+        DataType::I32 => combine_u32(words, idx, word_order)? as i32 as f64,
+        DataType::F32 => f32::from_bits(combine_u32(words, idx, word_order)?) as f64,
+    })
 }
 
 /// Combines two consecutive 16-bit registers into a 32-bit value per the
 /// block's word order: `big_endian` means the first (lower-address) register
 /// holds the high-order 16 bits, `little_endian` swaps that.
-fn combine_u32(words: &[u16], idx: usize, word_order: WordOrder) -> u32 {
+fn combine_u32(words: &[u16], idx: usize, word_order: WordOrder) -> Option<u32> {
+    let pair = words.get(idx..idx.checked_add(2)?)?;
+    let (first, second) = (pair[0], pair[1]);
     let (hi, lo) = match word_order {
-        WordOrder::BigEndian => (words[idx], words[idx + 1]),
-        WordOrder::LittleEndian => (words[idx + 1], words[idx]),
+        WordOrder::BigEndian => (first, second),
+        WordOrder::LittleEndian => (second, first),
     };
-    ((hi as u32) << 16) | (lo as u32)
+    Some(((hi as u32) << 16) | (lo as u32))
 }
 
 #[cfg(test)]
@@ -188,5 +199,20 @@ mod tests {
             readings,
             vec![("p".to_string(), 10.0), ("p".to_string(), 20.0)]
         );
+    }
+
+    #[test]
+    fn short_response_skips_missing_points_without_panicking() {
+        let block = block(
+            WordOrder::BigEndian,
+            vec![
+                point(0, DataType::U16, 1.0, false),
+                point(1, DataType::U32, 1.0, false),
+                point(3, DataType::F32, 1.0, false),
+            ],
+        );
+        // Only 2 of the 5 registers: the u32 at offset 1 is cut in half.
+        assert_eq!(decode(&block, &[7, 8]), vec![("p".to_string(), 7.0)]);
+        assert!(decode(&block, &[]).is_empty());
     }
 }

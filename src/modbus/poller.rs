@@ -58,6 +58,12 @@ pub fn is_transport_fatal(e: &tokio_modbus::Error) -> bool {
 /// Outcome of reading one block, collapsed to what the poll loop acts on.
 enum BlockResult {
     Words(Vec<u16>),
+    /// A response with a different number of registers than requested.
+    /// tokio-modbus only checks this with a `debug_assert`.
+    WrongLength {
+        expected: u16,
+        got: usize,
+    },
     Exception(ExceptionCode),
     Protocol(tokio_modbus::Error),
     Timeout,
@@ -143,11 +149,22 @@ async fn read_block(ctx: &mut Context, block: &BlockConfig, timeout: Duration) -
         }
     };
     match time::timeout(timeout, request).await {
-        Ok(Ok(Ok(words))) => BlockResult::Words(words),
+        Ok(Ok(Ok(words))) => check_length(block, words),
         Ok(Ok(Err(code))) => BlockResult::Exception(code),
         Ok(Err(e)) if is_transport_fatal(&e) => BlockResult::TransportFatal(e),
         Ok(Err(e)) => BlockResult::Protocol(e),
         Err(_) => BlockResult::Timeout,
+    }
+}
+
+fn check_length(block: &BlockConfig, words: Vec<u16>) -> BlockResult {
+    if words.len() == block.count as usize {
+        BlockResult::Words(words)
+    } else {
+        BlockResult::WrongLength {
+            expected: block.count,
+            got: words.len(),
+        }
     }
 }
 
@@ -234,6 +251,11 @@ pub async fn run_connection(
                                 }
                             }
                         }
+                        BlockResult::WrongLength { expected, got } => {
+                            warn!(expected, got, connection = %cfg.id, device = %device.id, "response has wrong register count, skipping device this tick");
+                            problem = Some("protocol error".to_string());
+                            break;
+                        }
                         BlockResult::Exception(code) => {
                             warn!(?code, connection = %cfg.id, device = %device.id, "modbus exception, skipping device this tick");
                             problem = Some(format!("exception: {code}"));
@@ -313,6 +335,31 @@ mod tests {
             }),
         });
         assert!(!is_transport_fatal(&protocol));
+    }
+
+    #[test]
+    fn response_length_must_match_block_count() {
+        let block = BlockConfig {
+            function: Function::Holding,
+            start: 0,
+            count: 4,
+            word_order: crate::config::schema::WordOrder::BigEndian,
+            points: vec![],
+        };
+        assert!(matches!(
+            check_length(&block, vec![1, 2, 3, 4]),
+            BlockResult::Words(w) if w == [1, 2, 3, 4]
+        ));
+        for words in [vec![], vec![1, 2, 3], vec![1, 2, 3, 4, 5]] {
+            let got = words.len();
+            assert!(
+                matches!(
+                    check_length(&block, words),
+                    BlockResult::WrongLength { expected: 4, got: g } if g == got
+                ),
+                "{got} words must be rejected"
+            );
+        }
     }
 
     #[test]

@@ -44,18 +44,6 @@ From `security-review.txt`. Finding numbers refer to that file.
 
 ### Worth doing
 
-#### Short Modbus responses must not panic (finding 2)
-
-`decode()` indexes `words[idx]` / `words[idx + 1]` without checking the
-length. tokio-modbus only checks the response length with `debug_assert`, so
-in a release build a faulty or malicious device can send fewer registers than
-requested, and the connection task panics and respawns in a loop.
-
-- In `poller.rs`, treat `words.len() != block.count` as a protocol error for
-  that device/tick (`DeviceProblem`). Don't decode it.
-- Use `words.get(..)` in `decode.rs` as a second safeguard.
-- Add a test with a short response.
-
 #### Tighter config validation (findings 4, 5g)
 
 Some config values are accepted but cause tight loops, flash wear or panics:
