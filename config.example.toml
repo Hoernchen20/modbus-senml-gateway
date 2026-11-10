@@ -31,7 +31,7 @@ id = "gw-router1"
 # Length of the averaging window in seconds. Every point is averaged over
 # this window and published once per window. Windows align to wall-clock
 # multiples of this value (60 = on every full minute).
-# Required. Must be > 0 (checked). Should be larger than the slowest
+# Required. 1-86400 (checked). Should be larger than the slowest
 # poll_interval_secs, or some windows will have no samples.
 aggregation_window_secs = 60
 
@@ -55,13 +55,12 @@ status_file_path = "/dev/container_config/status"
 
 # Minimum delay in seconds between a state change and the resulting status
 # file write. Groups rapid changes (e.g. a flapping connection) into one write.
-# Optional. Default: 2. 0 writes on every change.
+# Optional. Default: 2. 0-3600 (checked). 0 writes on every change.
 status_debounce_secs = 2
 
 # The status file is rewritten at least this often (seconds), even without
 # changes, so its "updated:" timestamp shows the gateway is alive.
-# Optional. Default: 30. Must be > 0 (not checked; 0 rewrites the file in a
-# tight loop).
+# Optional. Default: 30. 1-3600 (checked).
 status_heartbeat_secs = 30
 
 # =============================================================================
@@ -69,7 +68,8 @@ status_heartbeat_secs = 30
 # =============================================================================
 
 # Hostname or IP address of the MQTT broker.
-# Required. With tls = true this must match a name in the broker's certificate.
+# Required, not empty (checked). With tls = true this must match a name in
+# the broker's certificate.
 broker_host = "10.0.0.5"
 
 # Broker TCP port.
@@ -79,7 +79,7 @@ broker_port = 8883
 # MQTT client id. The gateway uses a persistent session, so this must stay
 # the same across restarts and must be unique on the broker (a second client
 # with the same id disconnects the first).
-# Required.
+# Required, not empty (checked).
 client_id = "modbus-gateway-router1"
 
 # Encrypt the broker connection with TLS. Only the CA in ca_cert_path is
@@ -95,7 +95,7 @@ tls = true
 ca_cert_path = "/etc/modbus-gateway/ca.pem"
 
 # Username for broker authentication.
-# Required.
+# Required, not empty (checked).
 username = "gateway"
 
 # Name of the environment variable holding the broker password. The
@@ -114,12 +114,13 @@ qos = 1
 
 # MQTT keep-alive interval in seconds. The client pings the broker when idle
 # for this long, and a dead connection is detected after about 1.5x this time.
-# Required. 0 disables keep-alive. Max 65535.
+# Required. 1-65535 (checked).
 keep_alive_secs = 30
 
 # Topic each device's SenML pack is published to. "{device}" is replaced by
 # the device id. One message per device per aggregation window.
-# Required. Should contain "{device}", otherwise all devices share one topic.
+# Required, not empty (checked). Should contain "{device}", otherwise all
+# devices share one topic.
 topic_template = "telemetry/{device}"
 
 # =============================================================================
@@ -152,24 +153,22 @@ port = 502
 
 # --- all transports ---
 # How often every device on this connection is polled, in seconds.
-# Required. Must be > 0 (checked). One poll reads all blocks of all devices,
+# Required. 1-86400 (checked). One poll reads all blocks of all devices,
 # so on slow serial buses this must leave enough time for that.
 poll_interval_secs = 10
 
 # Timeout for a single Modbus request in milliseconds. A device that does
 # not answer in time is skipped for this poll; the connection stays open.
-# Required. Must be > 0 (not checked; 0 makes every request time out).
-# Typical: 500-2000.
+# Required. 1-60000 (checked). Typical: 500-2000.
 io_timeout_ms = 1000
 
 # Delay before the first reconnect attempt after the connection failed,
 # in seconds. Doubles after each failed attempt up to the maximum below.
-# Optional. Default: 1. Should be > 0 (not checked; 0 retries without pause).
+# Optional. Default: 1. 1-3600 (checked).
 reconnect_backoff_min_secs = 1
 
 # Upper limit for the reconnect delay in seconds.
-# Optional. Default: 30. Should be >= reconnect_backoff_min_secs
-# (not checked; a smaller value caps every retry delay at this value).
+# Optional. Default: 30. 1-3600 and >= reconnect_backoff_min_secs (checked).
 reconnect_backoff_max_secs = 30
 
   # ---- Device on connection 1 ----
@@ -240,7 +239,8 @@ reconnect_backoff_max_secs = 30
       unit = "V"
 
       # Factor applied to the raw value: value = raw * scale.
-      # Optional. Default: 1.0. Any number, may be negative.
+      # Optional. Default: 1.0. Any finite number, may be negative (checked:
+      # nan/inf are rejected).
       # scale = 1.0
 
       # If true, the absolute value is published (applied after scale).

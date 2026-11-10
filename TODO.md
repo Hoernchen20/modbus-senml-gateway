@@ -44,22 +44,6 @@ From `security-review.txt`. Finding numbers refer to that file.
 
 ### Worth doing
 
-#### Tighter config validation (findings 4, 5g)
-
-Some config values are accepted but cause tight loops, flash wear or panics:
-
-- `status_heartbeat_secs = 0`: rewrites the status file in a tight loop (flash!).
-- `reconnect_backoff_max_secs = 0`: tight reconnect loop. Also require
-  `min <= max`.
-- `io_timeout_ms = 0`: every request times out at once.
-- Very large `aggregation_window_secs` / `poll_interval_secs` / timeouts:
-  `Instant::now() + d` overflows and panics. Set reasonable upper limits.
-- `keep_alive_secs > 65535` gets truncated by rumqttc (`65536` turns into `0`,
-  which disables keep-alive).
-- `scale` must be finite (TOML accepts `nan`/`inf`).
-- Reject empty `broker_host`, `client_id`, `username` and `topic_template`.
-- Add a test for each case: zero and extreme values.
-
 #### Drop non-finite readings (finding 5)
 
 A single NaN/Inf (e.g. an F32 register with a fault value) makes the whole

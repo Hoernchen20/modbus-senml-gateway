@@ -6,10 +6,44 @@ use thiserror::Error;
 
 use super::schema::{Config, Transport};
 
+/// Upper bounds keep `Instant::now() + duration` far from overflowing and
+/// catch obvious unit mistakes (ms vs. s).
+const MAX_AGGREGATION_WINDOW_SECS: u64 = 86_400;
+const MAX_POLL_INTERVAL_SECS: u64 = 86_400;
+const MAX_IO_TIMEOUT_MS: u64 = 60_000;
+const MAX_BACKOFF_SECS: u64 = 3_600;
+const MAX_STATUS_SECS: u64 = 3_600;
+/// rumqttc truncates keep-alive to u16 (`65536` would become `0`).
+const MAX_KEEP_ALIVE_SECS: u64 = u16::MAX as u64;
+
 #[derive(Debug, Error)]
 pub enum ValidationError {
-    #[error("{field} must be greater than 0")]
-    ZeroInterval { field: String },
+    #[error("{field} = {value} is out of range (allowed: {min}..={max})")]
+    OutOfRange {
+        field: String,
+        value: u64,
+        min: u64,
+        max: u64,
+    },
+
+    #[error(
+        "connection '{connection}': reconnect_backoff_min_secs ({min}) must not exceed reconnect_backoff_max_secs ({max})"
+    )]
+    BackoffMinExceedsMax {
+        connection: String,
+        min: u64,
+        max: u64,
+    },
+
+    #[error("device '{device}' point '{point}': scale = {scale} is not a finite number")]
+    NonFiniteScale {
+        device: String,
+        point: String,
+        scale: f64,
+    },
+
+    #[error("{0} must not be empty")]
+    Empty(&'static str),
 
     #[error("mqtt.qos = {0} is not a valid QoS (allowed: 0, 1, 2)")]
     InvalidQos(u8),
@@ -91,14 +125,67 @@ pub enum ValidationError {
     },
 }
 
-pub fn validate(config: &Config) -> Result<(), ValidationError> {
-    // A zero here would panic `tokio::time::interval` (poller) or divide by
-    // zero in the aggregator's boundary alignment.
-    if config.gateway.aggregation_window_secs == 0 {
-        return Err(ValidationError::ZeroInterval {
-            field: "gateway.aggregation_window_secs".to_string(),
-        });
+fn check_range(
+    field: impl Into<String>,
+    value: u64,
+    min: u64,
+    max: u64,
+) -> Result<(), ValidationError> {
+    if (min..=max).contains(&value) {
+        Ok(())
+    } else {
+        Err(ValidationError::OutOfRange {
+            field: field.into(),
+            value,
+            min,
+            max,
+        })
     }
+}
+
+fn check_not_empty(field: &'static str, value: &str) -> Result<(), ValidationError> {
+    if value.trim().is_empty() {
+        Err(ValidationError::Empty(field))
+    } else {
+        Ok(())
+    }
+}
+
+pub fn validate(config: &Config) -> Result<(), ValidationError> {
+    let gw = &config.gateway;
+    // A zero window would divide by zero in the aggregator's boundary
+    // alignment; a huge one overflows `Instant::now() + wait`.
+    check_range(
+        "gateway.aggregation_window_secs",
+        gw.aggregation_window_secs,
+        1,
+        MAX_AGGREGATION_WINDOW_SECS,
+    )?;
+    check_range(
+        "gateway.status_debounce_secs",
+        gw.status_debounce_secs,
+        0,
+        MAX_STATUS_SECS,
+    )?;
+    // Zero would rewrite the status file (often on flash) in a tight loop.
+    check_range(
+        "gateway.status_heartbeat_secs",
+        gw.status_heartbeat_secs,
+        1,
+        MAX_STATUS_SECS,
+    )?;
+
+    let mqtt = &config.mqtt;
+    check_not_empty("mqtt.broker_host", &mqtt.broker_host)?;
+    check_not_empty("mqtt.client_id", &mqtt.client_id)?;
+    check_not_empty("mqtt.username", &mqtt.username)?;
+    check_not_empty("mqtt.topic_template", &mqtt.topic_template)?;
+    check_range(
+        "mqtt.keep_alive_secs",
+        mqtt.keep_alive_secs,
+        1,
+        MAX_KEEP_ALIVE_SECS,
+    )?;
 
     if config
         .gateway
@@ -118,14 +205,52 @@ pub fn validate(config: &Config) -> Result<(), ValidationError> {
     let mut serial_ports: HashMap<String, String> = HashMap::new();
 
     for conn in &config.connections {
-        if conn.poll_interval_secs == 0 {
-            return Err(ValidationError::ZeroInterval {
-                field: format!("connection '{}': poll_interval_secs", conn.id),
+        // A zero interval would panic `tokio::time::interval`.
+        check_range(
+            format!("connection '{}': poll_interval_secs", conn.id),
+            conn.poll_interval_secs,
+            1,
+            MAX_POLL_INTERVAL_SECS,
+        )?;
+        check_range(
+            format!("connection '{}': io_timeout_ms", conn.id),
+            conn.io_timeout_ms,
+            1,
+            MAX_IO_TIMEOUT_MS,
+        )?;
+        // A zero backoff never grows (0 * 2 = 0): a tight reconnect loop.
+        check_range(
+            format!("connection '{}': reconnect_backoff_min_secs", conn.id),
+            conn.reconnect_backoff_min_secs,
+            1,
+            MAX_BACKOFF_SECS,
+        )?;
+        check_range(
+            format!("connection '{}': reconnect_backoff_max_secs", conn.id),
+            conn.reconnect_backoff_max_secs,
+            1,
+            MAX_BACKOFF_SECS,
+        )?;
+        if conn.reconnect_backoff_min_secs > conn.reconnect_backoff_max_secs {
+            return Err(ValidationError::BackoffMinExceedsMax {
+                connection: conn.id.clone(),
+                min: conn.reconnect_backoff_min_secs,
+                max: conn.reconnect_backoff_max_secs,
             });
         }
 
         let mut seen_unit_ids = HashSet::new();
         for device in &conn.devices {
+            for point in device.blocks.iter().flat_map(|b| &b.points) {
+                if !point.scale.is_finite() {
+                    return Err(ValidationError::NonFiniteScale {
+                        device: device.id.clone(),
+                        point: point.name.clone(),
+                        scale: point.scale,
+                    });
+                }
+            }
+
             if !seen_unit_ids.insert(device.unit_id) {
                 return Err(ValidationError::DuplicateUnitId {
                     connection: conn.id.clone(),
@@ -343,22 +468,120 @@ mod tests {
         validate(&valid_config()).expect("fixture config must be valid");
     }
 
-    #[test]
-    fn zero_aggregation_window_is_rejected() {
-        let mut config = valid_config();
-        config.gateway.aggregation_window_secs = 0;
-
-        let err = validate(&config).unwrap_err();
-        assert!(matches!(err, ValidationError::ZeroInterval { .. }));
+    /// Applies `set(config, value)` for each value and asserts whether
+    /// validation accepts it.
+    fn assert_range(name: &str, set: fn(&mut Config, u64), ok: &[u64], bad: &[u64]) {
+        for &value in ok {
+            let mut config = valid_config();
+            set(&mut config, value);
+            if let Err(e) = validate(&config) {
+                panic!("{name} = {value} must be accepted: {e}");
+            }
+        }
+        for &value in bad {
+            let mut config = valid_config();
+            set(&mut config, value);
+            match validate(&config) {
+                Err(ValidationError::OutOfRange { .. }) => {}
+                other => panic!("{name} = {value} must be OutOfRange, got {other:?}"),
+            }
+        }
     }
 
     #[test]
-    fn zero_poll_interval_is_rejected() {
-        let mut config = valid_config();
-        config.connections[0].poll_interval_secs = 0;
+    fn durations_reject_zero_and_extreme_values() {
+        assert_range(
+            "aggregation_window_secs",
+            |c, v| c.gateway.aggregation_window_secs = v,
+            &[1, 86_400],
+            &[0, 86_401, u64::MAX],
+        );
+        assert_range(
+            "status_heartbeat_secs",
+            |c, v| c.gateway.status_heartbeat_secs = v,
+            &[1, 3_600],
+            &[0, 3_601, u64::MAX],
+        );
+        assert_range(
+            "status_debounce_secs",
+            |c, v| c.gateway.status_debounce_secs = v,
+            &[0, 3_600],
+            &[3_601, u64::MAX],
+        );
+        assert_range(
+            "keep_alive_secs",
+            |c, v| c.mqtt.keep_alive_secs = v,
+            &[1, 65_535],
+            &[0, 65_536, u64::MAX],
+        );
+        assert_range(
+            "poll_interval_secs",
+            |c, v| c.connections[0].poll_interval_secs = v,
+            &[1, 86_400],
+            &[0, 86_401, u64::MAX],
+        );
+        assert_range(
+            "io_timeout_ms",
+            |c, v| c.connections[0].io_timeout_ms = v,
+            &[1, 60_000],
+            &[0, 60_001, u64::MAX],
+        );
+        assert_range(
+            "reconnect_backoff_min_secs",
+            |c, v| c.connections[0].reconnect_backoff_min_secs = v,
+            &[1, 30],
+            &[0, u64::MAX],
+        );
+        assert_range(
+            "reconnect_backoff_max_secs",
+            |c, v| {
+                c.connections[0].reconnect_backoff_min_secs = 1;
+                c.connections[0].reconnect_backoff_max_secs = v;
+            },
+            &[1, 3_600],
+            &[0, 3_601, u64::MAX],
+        );
+    }
 
-        let err = validate(&config).unwrap_err();
-        assert!(matches!(err, ValidationError::ZeroInterval { .. }));
+    #[test]
+    fn backoff_min_above_max_is_rejected() {
+        let mut config = valid_config();
+        config.connections[0].reconnect_backoff_min_secs = 10;
+        config.connections[0].reconnect_backoff_max_secs = 5;
+        assert!(matches!(
+            validate(&config),
+            Err(ValidationError::BackoffMinExceedsMax { .. })
+        ));
+    }
+
+    #[test]
+    fn non_finite_scale_is_rejected() {
+        for scale in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut config = valid_config();
+            config.connections[0].devices[0].blocks[0].points[0].scale = scale;
+            assert!(
+                matches!(
+                    validate(&config),
+                    Err(ValidationError::NonFiniteScale { .. })
+                ),
+                "scale = {scale}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_mqtt_fields_are_rejected() {
+        let setters: [fn(&mut Config); 4] = [
+            |c| c.mqtt.broker_host = String::new(),
+            |c| c.mqtt.client_id = " ".to_string(),
+            |c| c.mqtt.username = String::new(),
+            |c| c.mqtt.topic_template = String::new(),
+        ];
+        for set in setters {
+            let mut config = valid_config();
+            set(&mut config);
+            assert!(matches!(validate(&config), Err(ValidationError::Empty(_))));
+        }
     }
 
     #[test]
