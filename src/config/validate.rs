@@ -16,6 +16,10 @@ const MAX_STATUS_SECS: u64 = 3_600;
 /// rumqttc truncates keep-alive to u16 (`65536` would become `0`).
 const MAX_KEEP_ALIVE_SECS: u64 = u16::MAX as u64;
 
+/// IDs end up in MQTT topics, SenML names, syslog lines and the status
+/// file, so they are limited to a charset that is safe in all of them.
+pub const MAX_ID_LEN: usize = 64;
+
 #[derive(Debug, Error)]
 pub enum ValidationError {
     #[error("{field} = {value} is out of range (allowed: {min}..={max})")]
@@ -44,6 +48,23 @@ pub enum ValidationError {
 
     #[error("{0} must not be empty")]
     Empty(&'static str),
+
+    #[error(
+        "{field} = {value:?} is not a valid ID (1-{MAX_ID_LEN} characters from A-Z a-z 0-9 _ . -)"
+    )]
+    InvalidId { field: String, value: String },
+
+    #[error("mqtt.topic_template = {template:?}: {reason}")]
+    InvalidTopicTemplate {
+        template: String,
+        reason: &'static str,
+    },
+
+    #[error("duplicate {kind} id '{id}'")]
+    DuplicateId { kind: &'static str, id: String },
+
+    #[error("device '{device}': duplicate point name '{point}'")]
+    DuplicatePointName { device: String, point: String },
 
     #[error("mqtt.qos = {0} is not a valid QoS (allowed: 0, 1, 2)")]
     InvalidQos(u8),
@@ -151,8 +172,50 @@ fn check_not_empty(field: &'static str, value: &str) -> Result<(), ValidationErr
     }
 }
 
+pub fn is_valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_ID_LEN
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+}
+
+fn check_id(field: impl Into<String>, id: &str) -> Result<(), ValidationError> {
+    if is_valid_id(id) {
+        Ok(())
+    } else {
+        Err(ValidationError::InvalidId {
+            field: field.into(),
+            value: id.to_string(),
+        })
+    }
+}
+
+/// The template is published to as-is apart from the `{device}`
+/// substitution, so it must not contain MQTT wildcards and must give every
+/// device its own topic.
+fn check_topic_template(template: &str) -> Result<(), ValidationError> {
+    let invalid = |reason| {
+        Err(ValidationError::InvalidTopicTemplate {
+            template: template.to_string(),
+            reason,
+        })
+    };
+    if template.matches("{device}").count() != 1 {
+        return invalid("must contain '{device}' exactly once");
+    }
+    if template.contains(['#', '+']) {
+        return invalid("must not contain MQTT wildcards '#' or '+'");
+    }
+    if template.chars().any(char::is_control) {
+        return invalid("must not contain control characters");
+    }
+    Ok(())
+}
+
 pub fn validate(config: &Config) -> Result<(), ValidationError> {
     let gw = &config.gateway;
+    check_id("gateway.id", &gw.id)?;
     // A zero window would divide by zero in the aggregator's boundary
     // alignment; a huge one overflows `Instant::now() + wait`.
     check_range(
@@ -179,13 +242,13 @@ pub fn validate(config: &Config) -> Result<(), ValidationError> {
     check_not_empty("mqtt.broker_host", &mqtt.broker_host)?;
     check_not_empty("mqtt.client_id", &mqtt.client_id)?;
     check_not_empty("mqtt.username", &mqtt.username)?;
-    check_not_empty("mqtt.topic_template", &mqtt.topic_template)?;
     check_range(
         "mqtt.keep_alive_secs",
         mqtt.keep_alive_secs,
         1,
         MAX_KEEP_ALIVE_SECS,
     )?;
+    check_topic_template(&mqtt.topic_template)?;
 
     if config
         .gateway
@@ -203,8 +266,20 @@ pub fn validate(config: &Config) -> Result<(), ValidationError> {
     }
 
     let mut serial_ports: HashMap<String, String> = HashMap::new();
+    let mut connection_ids = HashSet::new();
+    // Global, not per connection: the aggregator, status file and MQTT
+    // topic all key on the device ID alone.
+    let mut device_ids = HashSet::new();
 
     for conn in &config.connections {
+        check_id("connection.id", &conn.id)?;
+        if !connection_ids.insert(conn.id.as_str()) {
+            return Err(ValidationError::DuplicateId {
+                kind: "connection",
+                id: conn.id.clone(),
+            });
+        }
+
         // A zero interval would panic `tokio::time::interval`.
         check_range(
             format!("connection '{}': poll_interval_secs", conn.id),
@@ -241,7 +316,23 @@ pub fn validate(config: &Config) -> Result<(), ValidationError> {
 
         let mut seen_unit_ids = HashSet::new();
         for device in &conn.devices {
+            check_id(format!("connection '{}': device.id", conn.id), &device.id)?;
+            if !device_ids.insert(device.id.as_str()) {
+                return Err(ValidationError::DuplicateId {
+                    kind: "device",
+                    id: device.id.clone(),
+                });
+            }
+
+            let mut point_names = HashSet::new();
             for point in device.blocks.iter().flat_map(|b| &b.points) {
+                check_id(format!("device '{}': point.name", device.id), &point.name)?;
+                if !point_names.insert(point.name.as_str()) {
+                    return Err(ValidationError::DuplicatePointName {
+                        device: device.id.clone(),
+                        point: point.name.clone(),
+                    });
+                }
                 if !point.scale.is_finite() {
                     return Err(ValidationError::NonFiniteScale {
                         device: device.id.clone(),
@@ -571,17 +662,109 @@ mod tests {
 
     #[test]
     fn empty_mqtt_fields_are_rejected() {
-        let setters: [fn(&mut Config); 4] = [
+        let setters: [fn(&mut Config); 3] = [
             |c| c.mqtt.broker_host = String::new(),
             |c| c.mqtt.client_id = " ".to_string(),
             |c| c.mqtt.username = String::new(),
-            |c| c.mqtt.topic_template = String::new(),
         ];
         for set in setters {
             let mut config = valid_config();
             set(&mut config);
             assert!(matches!(validate(&config), Err(ValidationError::Empty(_))));
         }
+    }
+
+    #[test]
+    fn invalid_ids_are_rejected() {
+        let long = "a".repeat(MAX_ID_LEN + 1);
+        let bad_ids = ["", "a/b", "a#", "a+", "a b", "a\nb", "ä", long.as_str()];
+        let setters: [fn(&mut Config, &str); 4] = [
+            |c, id| c.gateway.id = id.to_string(),
+            |c, id| c.connections[0].id = id.to_string(),
+            |c, id| c.connections[0].devices[0].id = id.to_string(),
+            |c, id| c.connections[0].devices[0].blocks[0].points[0].name = id.to_string(),
+        ];
+        for set in setters {
+            let mut config = valid_config();
+            set(&mut config, &"A-z_0.9".repeat(10)[..MAX_ID_LEN]);
+            validate(&config).expect("valid charset at max length must pass");
+            for id in bad_ids {
+                let mut config = valid_config();
+                set(&mut config, id);
+                assert!(
+                    matches!(validate(&config), Err(ValidationError::InvalidId { .. })),
+                    "id {id:?} must be rejected"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn topic_template_must_have_one_device_and_no_wildcards() {
+        for template in ["site/{device}/senml", "{device}"] {
+            let mut config = valid_config();
+            config.mqtt.topic_template = template.to_string();
+            validate(&config).unwrap_or_else(|e| panic!("{template}: {e}"));
+        }
+        for template in [
+            "",
+            "telemetry",
+            "telemetry/{device}/{device}",
+            "telemetry/#/{device}",
+            "+/{device}",
+            "telemetry/{device}\n",
+        ] {
+            let mut config = valid_config();
+            config.mqtt.topic_template = template.to_string();
+            assert!(
+                matches!(
+                    validate(&config),
+                    Err(ValidationError::InvalidTopicTemplate { .. })
+                ),
+                "{template:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_connection_ids_are_rejected() {
+        let mut config = valid_config();
+        let mut second = config.connections[0].clone();
+        second.devices[0].id = "meter2".to_string();
+        config.connections.push(second);
+        assert!(matches!(
+            validate(&config),
+            Err(ValidationError::DuplicateId {
+                kind: "connection",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn duplicate_device_ids_are_rejected_across_connections() {
+        let mut config = valid_config();
+        let mut second = config.connections[0].clone();
+        second.id = "conn2".to_string();
+        config.connections.push(second);
+        assert!(matches!(
+            validate(&config),
+            Err(ValidationError::DuplicateId { kind: "device", .. })
+        ));
+    }
+
+    #[test]
+    fn duplicate_point_names_are_rejected_across_blocks() {
+        let mut config = valid_config();
+        config.connections[0].devices[0].blocks.push(block(
+            4000,
+            1,
+            vec![point("voltage_l1", 0, DataType::U16)],
+        ));
+        assert!(matches!(
+            validate(&config),
+            Err(ValidationError::DuplicatePointName { .. })
+        ));
     }
 
     #[test]
@@ -632,7 +815,7 @@ mod tests {
             io_timeout_ms: 500,
             reconnect_backoff_min_secs: 1,
             reconnect_backoff_max_secs: 30,
-            devices: vec![device("sensor1", 1, vec![])],
+            devices: vec![device(&format!("{id}-sensor"), 1, vec![])],
         };
         config.connections = vec![rtu("busA"), rtu("busB")];
 

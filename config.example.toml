@@ -17,6 +17,10 @@
 # "Required" fields must be present. "Optional" fields show their default.
 # Limits marked "checked" are enforced at startup; limits marked
 # "not checked" are not enforced, but values outside them will not work.
+#
+# IDs (gateway, connection and device ids, point names) end up in MQTT
+# topics, SenML names, syslog and the status file. They must be
+# 1-64 characters from A-Z a-z 0-9 _ . - (checked).
 
 # =============================================================================
 [gateway]
@@ -24,8 +28,7 @@
 
 # Name of this gateway instance. Used as the syslog tag, in the status file,
 # and in the MQTT online/offline topic "telemetry/<id>/status".
-# Required. Any string; keep it short and free of spaces and "/", "+", "#"
-# because it becomes part of an MQTT topic.
+# Required. An ID (see above).
 id = "gw-router1"
 
 # Length of the averaging window in seconds. Every point is averaged over
@@ -119,8 +122,8 @@ keep_alive_secs = 30
 
 # Topic each device's SenML pack is published to. "{device}" is replaced by
 # the device id. One message per device per aggregation window.
-# Required, not empty (checked). Should contain "{device}", otherwise all
-# devices share one topic.
+# Required. Must contain "{device}" exactly once and no MQTT wildcards
+# "+" or "#" (checked).
 topic_template = "telemetry/{device}"
 
 # =============================================================================
@@ -135,7 +138,7 @@ topic_template = "telemetry/{device}"
 [[connection]]
 
 # Name of this connection, used in logs and the status file.
-# Required. Should be unique.
+# Required. An ID, unique across all connections (checked).
 id = "meter-tcp1"
 
 # Transport type. Decides which of the transport fields below are allowed.
@@ -175,8 +178,7 @@ reconnect_backoff_max_secs = 30
   [[connection.device]]
 
   # Device name. Used in the MQTT topic ("{device}") and the SenML base name.
-  # Required. Should be unique across the whole gateway, otherwise two
-  # devices publish to the same topic. Avoid spaces and "/", "+", "#".
+  # Required. An ID, unique across the whole gateway (checked).
   id = "meter1"
 
   # Modbus unit id (slave address) of the device.
@@ -215,7 +217,7 @@ reconnect_backoff_max_secs = 30
       [[connection.device.block.point]]
 
       # Measurement name, published as SenML "n".
-      # Required. Should be unique within the device.
+      # Required. An ID, unique within the device (checked).
       name = "voltage_l1"
 
       # Position of the value inside the block, counted in registers from

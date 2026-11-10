@@ -44,17 +44,6 @@ From `security-review.txt`. Finding numbers refer to that file.
 
 ### Worth doing
 
-#### Validate IDs: charset and uniqueness (findings 6, 7, 11)
-
-All checks belong in `validate.rs`:
-
-- Gateway, connection, device and point IDs must match `[A-Za-z0-9_.-]+`, with
-  a length limit. That prevents `/`, `#`, `+` in MQTT topics and newlines in
-  syslog and the status file.
-- `topic_template` must contain exactly one `{device}`.
-- Connection IDs and device IDs must be globally unique, and point names unique
-  per device. Today duplicates silently merge their readings in the aggregator.
-
 #### Warn about unknown config keys (finding 16)
 
 A typo in an optional key (e.g. `status_file_pth`) silently falls back to the
