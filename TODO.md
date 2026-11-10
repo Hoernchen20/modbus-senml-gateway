@@ -1,0 +1,39 @@
+# TODO
+
+## Configurable rounding per point
+
+Published values carry float noise, e.g. `228.49199981689452`, which makes the
+SenML messages longer than they need to be.
+
+Add an optional setting to `[[connection.device.block.point]]` for the number
+of decimal places, e.g. `decimals = 1`. Without it, values stay unrounded as
+they are today.
+
+- Round the final aggregated value just before publishing, so rounding errors
+  don't feed into the aggregation.
+- A rounded value can still print long, because some decimals have no exact
+  binary form. Check that the JSON output comes out short.
+- Document the setting in `config.example.toml`.
+
+## Device connection status in the SenML uplink
+
+Right now a device that can't be read sends no pack at all. On the receiving
+side, a broken device looks the same as a dead router or a lost MQTT link.
+
+Publish a boolean record per device in every aggregation window, e.g.
+`{"n": "online", "vb": false}` (SenML `vb`):
+
+- Emit the pack every window, even when no samples were collected. It then
+  holds only the status record (with `bn`/`bt`).
+- `online = true` if the device was read successfully at least once in the
+  window, `false` otherwise (timeout, exception, protocol error, or the
+  connection being down). If the connection is down, every device on it reports
+  `false`.
+- Get the state from the same poller results that already feed `StatusEvent`
+  (`DeviceOk` / `DeviceProblem`), so the uplink and the status file agree.
+- Telling the cases apart downstream: pack with `online=false` means a device
+  or bus problem; no pack at all means a router, network or MQTT problem.
+- Possible extension: send the share of successful polls (`0.0`–`1.0`) instead
+  of a bool, to catch flaky devices. Not needed for now.
+- Check how this works with `majority_unit` (the status record has no unit) and
+  update the tests and `config.example.toml`/docs.
