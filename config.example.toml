@@ -17,6 +17,7 @@
 # "Required" fields must be present. "Optional" fields show their default.
 # Limits marked "checked" are enforced at startup; limits marked
 # "not checked" are not enforced, but values outside them will not work.
+# Unknown keys (e.g. a typo like "status_file_pth") are rejected (checked).
 #
 # IDs (gateway, connection and device ids, point names) end up in MQTT
 # topics, SenML names, syslog and the status file. They must be

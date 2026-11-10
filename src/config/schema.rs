@@ -1,6 +1,7 @@
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub gateway: GatewayConfig,
     pub mqtt: MqttConfig,
@@ -9,6 +10,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GatewayConfig {
     pub id: String,
     pub aggregation_window_secs: u64,
@@ -35,6 +37,7 @@ fn default_status_heartbeat_secs() -> u64 {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MqttConfig {
     pub broker_host: String,
     pub broker_port: u16,
@@ -53,6 +56,9 @@ fn default_qos() -> u8 {
     1
 }
 
+// No `deny_unknown_fields` here: serde doesn't support it next to
+// `flatten`. Keys this struct doesn't know are handed to `Transport`, whose
+// variants deny unknown fields, so typos are rejected there instead.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConnectionConfig {
     pub id: String,
@@ -77,7 +83,7 @@ fn default_backoff_max_secs() -> u64 {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "transport", rename_all = "lowercase")]
+#[serde(tag = "transport", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Transport {
     Tcp {
         host: String,
@@ -115,6 +121,7 @@ pub enum Parity {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeviceConfig {
     pub id: String,
     pub unit_id: u8,
@@ -123,6 +130,7 @@ pub struct DeviceConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BlockConfig {
     pub function: Function,
     pub start: u16,
@@ -149,6 +157,7 @@ pub enum WordOrder {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PointConfig {
     pub name: String,
     pub offset: u16,
@@ -372,6 +381,45 @@ serial_port = "/dev/ttyUSB0"
             result.is_err(),
             "an rtu transport missing required baud_rate must fail to deserialize"
         );
+    }
+
+    /// Inserts `line` right after the first occurrence of `anchor` in the
+    /// full example and asserts the result is rejected naming the key.
+    fn assert_unknown_key_rejected(anchor: &str, line: &str, key: &str) {
+        let toml_str = FULL_EXAMPLE.replacen(anchor, &format!("{anchor}\n{line}"), 1);
+        assert_ne!(toml_str, FULL_EXAMPLE, "anchor '{anchor}' not found");
+        let err = toml::from_str::<Config>(&toml_str)
+            .expect_err("unknown key must be rejected")
+            .to_string();
+        assert!(err.contains(key), "error should name '{key}': {err}");
+    }
+
+    #[test]
+    fn unknown_keys_are_rejected_everywhere() {
+        let cases = [
+            (
+                "[gateway]",
+                "status_file_pth = \"/tmp/x\"",
+                "status_file_pth",
+            ),
+            ("[mqtt]", "keepalive_secs = 30", "keepalive_secs"),
+            (
+                "io_timeout_ms = 1000",
+                "reconnect_backoff_mn_secs = 1",
+                "reconnect_backoff_mn_secs",
+            ),
+            (
+                "io_timeout_ms = 500",
+                "inter_frame_dely_ms = 5",
+                "inter_frame_dely_ms",
+            ),
+            ("unit_id = 1", "unitid = 2", "unitid"),
+            ("count = 8", "word_ordr = \"little_endian\"", "word_ordr"),
+            ("name = \"voltage_l1\"", "scael = 0.1", "scael"),
+        ];
+        for (anchor, line, key) in cases {
+            assert_unknown_key_rejected(anchor, line, key);
+        }
     }
 
     #[test]

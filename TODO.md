@@ -44,14 +44,6 @@ From `security-review.txt`. Finding numbers refer to that file.
 
 ### Worth doing
 
-#### Warn about unknown config keys (finding 16)
-
-A typo in an optional key (e.g. `status_file_pth`) silently falls back to the
-default. `#[serde(deny_unknown_fields)]` doesn't work on `ConnectionConfig`,
-because it uses `#[serde(flatten)]` with the internally tagged `Transport`.
-Options: deny it on the other structs only, or collect ignored keys with the
-`serde_ignored` crate and warn or fail at startup.
-
 #### Safer status file temp write (finding 3)
 
 `write_atomic` creates a fixed `<path>.tmp` with `File::create`, which follows
