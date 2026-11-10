@@ -240,7 +240,8 @@ reconnect_backoff_max_secs = 30
 
       # Factor applied to the raw value: value = raw * scale.
       # Optional. Default: 1.0. Any finite number, may be negative (checked:
-      # nan/inf are rejected).
+      # nan/inf are rejected). Readings that come out as NaN or infinity
+      # (e.g. an f32 fault value) are dropped and logged, not published.
       # scale = 1.0
 
       # If true, the absolute value is published (applied after scale).

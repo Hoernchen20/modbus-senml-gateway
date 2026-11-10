@@ -186,12 +186,16 @@ async fn serve(master: AsyncFd<PtyMaster>, state: Arc<Mutex<State>>) {
             let pdu = match behavior {
                 UnitBehavior::Silent => continue,
                 UnitBehavior::Exception(code) => vec![function | 0x80, code],
-                UnitBehavior::Respond => {
+                UnitBehavior::Respond | UnitBehavior::Fixed(_) => {
                     let start = u16::from_be_bytes([request[2], request[3]]);
                     let count = u16::from_be_bytes([request[4], request[5]]);
                     let mut out = vec![function, (count * 2) as u8];
                     for addr in start..start + count {
-                        out.extend_from_slice(&register_value(unit, function, addr).to_be_bytes());
+                        let value = match behavior {
+                            UnitBehavior::Fixed(v) => v,
+                            _ => register_value(unit, function, addr),
+                        };
+                        out.extend_from_slice(&value.to_be_bytes());
                     }
                     out
                 }

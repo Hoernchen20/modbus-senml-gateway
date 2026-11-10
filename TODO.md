@@ -44,14 +44,6 @@ From `security-review.txt`. Finding numbers refer to that file.
 
 ### Worth doing
 
-#### Drop non-finite readings (finding 5)
-
-A single NaN/Inf (e.g. an F32 register with a fault value) makes the whole
-window's mean NaN, and serde_json writes it as `"v": null`, which is invalid
-SenML. Drop non-finite values after scaling, before they reach the
-aggregator, with a rate-limited warning. Tests for NaN/Inf. Possibly ties in
-with the device status record above.
-
 #### Validate IDs: charset and uniqueness (findings 6, 7, 11)
 
 All checks belong in `validate.rs`:

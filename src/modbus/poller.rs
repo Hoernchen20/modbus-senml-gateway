@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io;
 use std::time::Duration;
 
@@ -193,6 +194,9 @@ pub async fn run_connection(
         Duration::from_secs(cfg.reconnect_backoff_min_secs),
         Duration::from_secs(cfg.reconnect_backoff_max_secs),
     );
+    // Points currently returning NaN/Inf, so each fault episode is logged
+    // once rather than on every poll.
+    let mut non_finite: HashSet<PointId> = HashSet::new();
 
     loop {
         let mut ctx = match connect(&cfg.transport, io_timeout).await {
@@ -235,13 +239,23 @@ pub async fn run_connection(
                             // drops would otherwise reconnect at min backoff forever.
                             backoff.reset();
                             for (point, value) in decode(block, &words) {
-                                let reading = Reading {
-                                    point_id: PointId {
-                                        device: device.id.clone(),
-                                        point,
-                                    },
-                                    value,
+                                let point_id = PointId {
+                                    device: device.id.clone(),
+                                    point,
                                 };
+                                // One NaN would turn the whole window's mean
+                                // into NaN, which serializes as `"v": null`.
+                                if !value.is_finite() {
+                                    if !non_finite.contains(&point_id) {
+                                        warn!(connection = %cfg.id, device = %device.id, point = %point_id.point, %value, "non-finite value, dropping reading until it recovers");
+                                        non_finite.insert(point_id);
+                                    }
+                                    continue;
+                                }
+                                if non_finite.remove(&point_id) {
+                                    info!(connection = %cfg.id, device = %device.id, point = %point_id.point, "value finite again");
+                                }
+                                let reading = Reading { point_id, value };
                                 match tx.try_send(reading) {
                                     Ok(()) => {}
                                     Err(mpsc::error::TrySendError::Full(_)) => {

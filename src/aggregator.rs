@@ -112,6 +112,10 @@ fn next_boundary(now: Duration, window: Duration) -> (Duration, u64) {
 }
 
 fn record(agg: &mut HashMap<PointId, PointAgg>, reading: Reading) {
+    // The poller already drops these; a NaN here would poison the mean.
+    if !reading.value.is_finite() {
+        return;
+    }
     if let Some(point_agg) = agg.get_mut(&reading.point_id) {
         point_agg.sum += reading.value;
         point_agg.count += 1;
@@ -175,6 +179,23 @@ mod tests {
         let (wait, boundary) = next_boundary(Duration::from_secs(90), Duration::from_secs(60));
         assert_eq!(boundary, 120);
         assert_eq!(wait, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn record_ignores_non_finite_values() {
+        let mut agg = HashMap::from([(point_id("d1", "p1"), PointAgg::new("V".to_string()))]);
+        for value in [f64::NAN, 4.0, f64::INFINITY, f64::NEG_INFINITY] {
+            record(
+                &mut agg,
+                Reading {
+                    point_id: point_id("d1", "p1"),
+                    value,
+                },
+            );
+        }
+
+        let p = &agg[&point_id("d1", "p1")];
+        assert_eq!((p.count, p.sum, p.min, p.max), (1, 4.0, 4.0, 4.0));
     }
 
     #[test]

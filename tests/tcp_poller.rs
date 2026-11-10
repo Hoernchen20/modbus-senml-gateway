@@ -5,7 +5,10 @@ use std::time::Duration;
 use common::{
     by_point, collect_for, device, key, register_value, MockTcpServer, ServerMode, UnitBehavior,
 };
-use modbus_senml_gateway::config::schema::{ConnectionConfig, DeviceConfig, Transport};
+use modbus_senml_gateway::config::schema::{
+    BlockConfig, ConnectionConfig, DataType, DeviceConfig, Function, PointConfig, Transport,
+    WordOrder,
+};
 use modbus_senml_gateway::modbus::poller::run_connection;
 use modbus_senml_gateway::status::{StatusEvent, StatusReporter, STATUS_CHANNEL_CAPACITY};
 use tokio::sync::mpsc;
@@ -134,6 +137,54 @@ async fn modbus_exception_skips_only_that_device_and_keeps_connection() {
     assert!(!events
         .iter()
         .any(|e| matches!(e, StatusEvent::ConnectionDown { .. })));
+
+    poller.abort();
+}
+
+#[tokio::test]
+async fn non_finite_values_are_dropped_but_device_stays_ok() {
+    let point = |name: &str, offset, data_type| PointConfig {
+        name: name.to_string(),
+        offset,
+        data_type,
+        scale: 1.0,
+        absolute: false,
+        unit: "V".to_string(),
+    };
+    let meter = DeviceConfig {
+        id: "meter1".to_string(),
+        unit_id: 1,
+        blocks: vec![BlockConfig {
+            function: Function::Holding,
+            start: 0,
+            count: 3,
+            word_order: WordOrder::BigEndian,
+            points: vec![
+                point("float", 0, DataType::F32),
+                point("raw", 2, DataType::U16),
+            ],
+        }],
+    };
+    let server = MockTcpServer::start().await;
+    // 0x7FC0_7FC0 has an all-ones exponent and a nonzero mantissa: NaN.
+    server.set_unit(1, UnitBehavior::Fixed(0x7FC0));
+    assert!(f32::from_bits(0x7FC0_7FC0).is_nan());
+    let (tx, mut rx) = mpsc::channel(64);
+    let (status, mut status_rx) = status_channel();
+    let poller = tokio::spawn(run_connection(connection(&server, vec![meter]), tx, status));
+
+    let readings = collect_for(&mut rx, Duration::from_millis(1500)).await;
+
+    assert_eq!(
+        readings.len(),
+        2,
+        "only 'raw' on each of two ticks: {readings:?}"
+    );
+    assert!(readings
+        .iter()
+        .all(|r| r.point_id.point == "raw" && r.value == 0x7FC0 as f64));
+    let events = drain(&mut status_rx);
+    assert!(events.contains(&device_ok("meter1")), "{events:?}");
 
     poller.abort();
 }
