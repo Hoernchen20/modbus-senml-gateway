@@ -44,9 +44,6 @@ From `security-review.txt`. Finding numbers refer to that file.
 
 ### Nice to have
 
-- **Password as a secret type** (finding 10): `zeroize`/`secrecy` for the
-  password, and never print `MqttOptions` with `{:?}` (the rumqttc Debug output
-  includes the password).
 - **Don't run as root** (finding 8): in the router container probably not
   practical (`mknod /dev/ttyS1` in `start.sh` needs root; you could drop
   privileges afterwards). For OpenRC, a dedicated user plus `dialout` would be

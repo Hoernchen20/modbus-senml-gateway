@@ -52,6 +52,24 @@ pub fn qos(value: u8) -> Result<QoS, MqttSetupError> {
     rumqttc::qos(value).map_err(|_| MqttSetupError::InvalidQos(value))
 }
 
+/// `MqttOptions` with the credentials kept out of `Debug`: rumqttc's own
+/// `Debug` prints the password in plain text (security review finding 10),
+/// so the options only ever travel inside this wrapper. rumqttc still keeps
+/// an ordinary `String` copy of the password for reconnects; it is not
+/// wiped from memory.
+pub struct BrokerOptions(MqttOptions);
+
+impl std::fmt::Debug for BrokerOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (host, port) = self.0.broker_address();
+        f.debug_struct("BrokerOptions")
+            .field("client_id", &self.0.client_id())
+            .field("broker", &format_args!("{host}:{port}"))
+            .field("credentials", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Reads the broker password from the environment variable named by
 /// `mqtt.password_env` — it never lives in the config file.
 pub fn read_password(cfg: &MqttConfig) -> Result<String, MqttSetupError> {
@@ -69,7 +87,7 @@ pub fn build_mqtt_options(
     cfg: &MqttConfig,
     gateway_id: &str,
     password: String,
-) -> Result<MqttOptions, MqttSetupError> {
+) -> Result<BrokerOptions, MqttSetupError> {
     let mut opts = MqttOptions::new(&cfg.client_id, &cfg.broker_host, cfg.broker_port);
     opts.set_clean_session(false)
         .set_keep_alive(Duration::from_secs(cfg.keep_alive_secs))
@@ -90,7 +108,7 @@ pub fn build_mqtt_options(
         }));
     }
 
-    Ok(opts)
+    Ok(BrokerOptions(opts))
 }
 
 /// Publishes each batch as one SenML pack (§8, §9) until `rx` closes, then
@@ -102,14 +120,14 @@ pub fn build_mqtt_options(
 /// `status` (§11.2).
 pub async fn run_publisher(
     mut rx: mpsc::Receiver<AggregatedBatch>,
-    options: MqttOptions,
+    options: BrokerOptions,
     mqtt: MqttConfig,
     gateway: GatewayConfig,
     status: StatusReporter,
 ) -> Result<(), MqttSetupError> {
     let qos = qos(mqtt.qos)?;
     let status_topic = status_topic(&gateway.id);
-    let (client, eventloop) = AsyncClient::new(options, QUEUE_CAPACITY);
+    let (client, eventloop) = AsyncClient::new(options.0, QUEUE_CAPACITY);
 
     let eventloop_task = tokio::spawn(drive_eventloop(
         eventloop,
@@ -248,7 +266,9 @@ mod tests {
     #[test]
     fn options_use_persistent_session_and_retained_offline_will() {
         let cfg = mqtt_config(false);
-        let opts = build_mqtt_options(&cfg, "gw-router1", "secret".to_string()).unwrap();
+        let opts = build_mqtt_options(&cfg, "gw-router1", "secret".to_string())
+            .unwrap()
+            .0;
 
         assert!(!opts.clean_session());
         assert_eq!(opts.client_id(), "modbus-gateway-router1");
@@ -267,7 +287,7 @@ mod tests {
     #[test]
     fn tls_trusts_only_the_configured_ca() {
         let cfg = mqtt_config(true);
-        let opts = build_mqtt_options(&cfg, "gw", "pw".to_string()).unwrap();
+        let opts = build_mqtt_options(&cfg, "gw", "pw".to_string()).unwrap().0;
 
         match opts.transport() {
             Transport::Tls(TlsConfiguration::Simple {
@@ -283,8 +303,16 @@ mod tests {
     #[test]
     fn plain_tcp_when_tls_disabled() {
         let cfg = mqtt_config(false);
-        let opts = build_mqtt_options(&cfg, "gw", "pw".to_string()).unwrap();
+        let opts = build_mqtt_options(&cfg, "gw", "pw".to_string()).unwrap().0;
         assert!(matches!(opts.transport(), Transport::Tcp));
+    }
+
+    #[test]
+    fn debug_output_hides_the_password() {
+        let opts = build_mqtt_options(&mqtt_config(true), "gw", "hunter2".to_string()).unwrap();
+        let debug = format!("{opts:?}");
+        assert!(!debug.contains("hunter2"), "{debug}");
+        assert!(debug.contains("modbus-gateway-router1"), "{debug}");
     }
 
     #[test]
