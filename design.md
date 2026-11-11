@@ -547,8 +547,10 @@ MQTT publish per device per window — this is why `topic_template` in
 - TLS trusts only the CA at `mqtt.ca_cert_path` — deployment is a private
   network against an internal CA, not the public web, so the system trust
   store is irrelevant and isn't consulted. No client cert (mTLS is a
-  non-goal, §1). The cert is loaded and parsed once during config load
-  (§5); a missing or unparseable file is a startup validation failure,
+  non-goal, §1). TLS 1.2 and 1.3 are both allowed (rustls defaults);
+  there is no CRL/OCSP check, so revoking a broker cert relies on its
+  lifetime or on replacing the CA. The cert is loaded and parsed once
+  during config load (§5); a missing or unparseable file is a startup validation failure,
   same as any other bad config value — not something discovered on first
   connect attempt.
 
