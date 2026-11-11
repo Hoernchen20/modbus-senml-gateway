@@ -50,6 +50,11 @@ pub struct MqttConfig {
     pub qos: u8,
     pub keep_alive_secs: u64,
     pub topic_template: String,
+    /// Contents of `ca_cert_path`, read and checked once by
+    /// `config::load` (§5). The TLS trust store is built from these exact
+    /// bytes, so the file is never read a second time.
+    #[serde(skip)]
+    pub ca_cert_pem: Vec<u8>,
 }
 
 fn default_qos() -> u8 {

@@ -47,9 +47,6 @@ From `security-review.txt`. Finding numbers refer to that file.
 - **Warn when `tls = false`** (finding 1): log a clear warning at startup that
   the password and telemetry go out unencrypted. Don't reject it, because the
   dev setup / isolated networks need plaintext.
-- **Read the CA file only once** (finding 9): validation and
-  `build_mqtt_options` each read it. Pass the bytes along. A small cleanup, the
-  real risk is minimal.
 - **Password as a secret type** (finding 10): `zeroize`/`secrecy` for the
   password, and never print `MqttOptions` with `{:?}` (the rumqttc Debug output
   includes the password).

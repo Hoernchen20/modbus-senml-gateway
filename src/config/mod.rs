@@ -36,12 +36,15 @@ pub fn load(path: impl AsRef<Path>) -> Result<Config, ConfigError> {
         source: e,
     })?;
 
-    let config: Config = toml::from_str(&contents).map_err(|e| ConfigError::Parse {
+    let mut config: Config = toml::from_str(&contents).map_err(|e| ConfigError::Parse {
         path: path_str.clone(),
         source: e,
     })?;
 
     validate::validate(&config)?;
+    // Checked even with tls = false, so switching TLS on later can't
+    // surface a broken CA file only at that point.
+    config.mqtt.ca_cert_pem = validate::read_ca_cert(&config.mqtt.ca_cert_path)?;
 
     Ok(config)
 }

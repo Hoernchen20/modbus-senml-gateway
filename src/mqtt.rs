@@ -32,13 +32,6 @@ pub enum MqttSetupError {
     #[error("mqtt.password_env: environment variable '{var}' is not set")]
     PasswordMissing { var: String },
 
-    #[error("mqtt.ca_cert_path '{path}': failed to read file: {source}")]
-    CaCert {
-        path: String,
-        #[source]
-        source: std::io::Error,
-    },
-
     #[error("mqtt.qos = {0} is not a valid QoS (allowed: 0, 1, 2)")]
     InvalidQos(u8),
 }
@@ -69,7 +62,9 @@ pub fn read_password(cfg: &MqttConfig) -> Result<String, MqttSetupError> {
 
 /// Persistent session with a stable client id, credentials, retained
 /// "offline" LWT on the status topic, and — with `tls` — a trust store
-/// holding only the CA at `ca_cert_path` (no system roots, no client cert).
+/// holding only the CA from `ca_cert_path` (no system roots, no client
+/// cert). The CA comes from `cfg.ca_cert_pem`, the bytes `config::load`
+/// already read and checked; the file itself is not read again.
 pub fn build_mqtt_options(
     cfg: &MqttConfig,
     gateway_id: &str,
@@ -88,14 +83,8 @@ pub fn build_mqtt_options(
         ));
 
     if cfg.tls {
-        // Already parsed once during config validation (§5); a read failure
-        // here means the file changed underneath us since startup.
-        let ca = std::fs::read(&cfg.ca_cert_path).map_err(|e| MqttSetupError::CaCert {
-            path: cfg.ca_cert_path.clone(),
-            source: e,
-        })?;
         opts.set_transport(Transport::Tls(TlsConfiguration::Simple {
-            ca,
+            ca: cfg.ca_cert_pem.clone(),
             alpn: None,
             client_auth: None,
         }));
@@ -223,26 +212,20 @@ impl Drop for AbortOnDrop {
 mod tests {
     use super::*;
 
-    fn mqtt_config(tls: bool, ca_cert_path: &str) -> MqttConfig {
+    fn mqtt_config(tls: bool) -> MqttConfig {
         MqttConfig {
             broker_host: "10.0.0.5".to_string(),
             broker_port: 8883,
             client_id: "modbus-gateway-router1".to_string(),
             tls,
-            ca_cert_path: ca_cert_path.to_string(),
+            ca_cert_path: "/unused/ca.pem".to_string(),
             username: "gateway".to_string(),
             password_env: "MODBUS_GW_TEST_UNSET_PASSWORD_VAR".to_string(),
             qos: 1,
             keep_alive_secs: 30,
             topic_template: "telemetry/{device}".to_string(),
+            ca_cert_pem: b"ca bytes from config::load".to_vec(),
         }
-    }
-
-    fn valid_ca_cert_path() -> &'static str {
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/src/config/testdata/valid_ca.pem"
-        )
     }
 
     #[test]
@@ -264,7 +247,7 @@ mod tests {
 
     #[test]
     fn options_use_persistent_session_and_retained_offline_will() {
-        let cfg = mqtt_config(false, valid_ca_cert_path());
+        let cfg = mqtt_config(false);
         let opts = build_mqtt_options(&cfg, "gw-router1", "secret".to_string()).unwrap();
 
         assert!(!opts.clean_session());
@@ -283,14 +266,14 @@ mod tests {
 
     #[test]
     fn tls_trusts_only_the_configured_ca() {
-        let cfg = mqtt_config(true, valid_ca_cert_path());
+        let cfg = mqtt_config(true);
         let opts = build_mqtt_options(&cfg, "gw", "pw".to_string()).unwrap();
 
         match opts.transport() {
             Transport::Tls(TlsConfiguration::Simple {
                 ca, client_auth, ..
             }) => {
-                assert_eq!(ca, std::fs::read(valid_ca_cert_path()).unwrap());
+                assert_eq!(ca, b"ca bytes from config::load");
                 assert!(client_auth.is_none(), "mTLS is a non-goal");
             }
             _ => panic!("expected TLS transport with CA only"),
@@ -299,23 +282,14 @@ mod tests {
 
     #[test]
     fn plain_tcp_when_tls_disabled() {
-        let cfg = mqtt_config(false, valid_ca_cert_path());
+        let cfg = mqtt_config(false);
         let opts = build_mqtt_options(&cfg, "gw", "pw".to_string()).unwrap();
         assert!(matches!(opts.transport(), Transport::Tcp));
     }
 
     #[test]
-    fn missing_ca_file_is_an_error() {
-        let cfg = mqtt_config(true, "/nonexistent/ca.pem");
-        assert!(matches!(
-            build_mqtt_options(&cfg, "gw", "pw".to_string()),
-            Err(MqttSetupError::CaCert { .. })
-        ));
-    }
-
-    #[test]
     fn unset_password_env_is_an_error() {
-        let cfg = mqtt_config(false, valid_ca_cert_path());
+        let cfg = mqtt_config(false);
         assert!(matches!(
             read_password(&cfg),
             Err(MqttSetupError::PasswordMissing { var }) if var == "MODBUS_GW_TEST_UNSET_PASSWORD_VAR"

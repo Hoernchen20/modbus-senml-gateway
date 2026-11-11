@@ -436,12 +436,13 @@ pub fn validate(config: &Config) -> Result<(), ValidationError> {
         }
     }
 
-    validate_ca_cert(&config.mqtt.ca_cert_path)?;
-
     Ok(())
 }
 
-fn validate_ca_cert(path: &str) -> Result<(), ValidationError> {
+/// Reads the CA file at `path` and checks it holds at least one parseable
+/// PEM certificate. Returns the bytes as read, so the caller can hand the
+/// very same bytes to TLS instead of reading the file again.
+pub fn read_ca_cert(path: &str) -> Result<Vec<u8>, ValidationError> {
     let bytes = std::fs::read(path).map_err(|e| ValidationError::CaCertUnreadable {
         path: path.to_string(),
         source: e,
@@ -457,7 +458,7 @@ fn validate_ca_cert(path: &str) -> Result<(), ValidationError> {
             path: path.to_string(),
         });
     }
-    Ok(())
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -519,6 +520,7 @@ mod tests {
                 qos: 1,
                 keep_alive_secs: 30,
                 topic_template: "telemetry/{device}".to_string(),
+                ca_cert_pem: Vec::new(),
             },
             connections: vec![ConnectionConfig {
                 id: "conn1".to_string(),
@@ -878,11 +880,14 @@ mod tests {
     }
 
     #[test]
-    fn missing_ca_cert_file_is_rejected() {
-        let mut config = valid_config();
-        config.mqtt.ca_cert_path = "/nonexistent/ca.pem".to_string();
+    fn ca_cert_is_returned_as_read() {
+        let path = valid_ca_cert_path();
+        assert_eq!(read_ca_cert(&path).unwrap(), std::fs::read(&path).unwrap());
+    }
 
-        let err = validate(&config).unwrap_err();
+    #[test]
+    fn missing_ca_cert_file_is_rejected() {
+        let err = read_ca_cert("/nonexistent/ca.pem").unwrap_err();
         assert!(matches!(err, ValidationError::CaCertUnreadable { .. }));
     }
 
@@ -894,10 +899,7 @@ mod tests {
         ));
         std::fs::write(&path, b"not a certificate").unwrap();
 
-        let mut config = valid_config();
-        config.mqtt.ca_cert_path = path.display().to_string();
-
-        let err = validate(&config).unwrap_err();
+        let err = read_ca_cert(&path.display().to_string()).unwrap_err();
         assert!(matches!(err, ValidationError::CaCertEmpty { .. }));
 
         std::fs::remove_file(&path).ok();
@@ -915,10 +917,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut config = valid_config();
-        config.mqtt.ca_cert_path = path.display().to_string();
-
-        let err = validate(&config).unwrap_err();
+        let err = read_ca_cert(&path.display().to_string()).unwrap_err();
         assert!(matches!(err, ValidationError::CaCertUnparseable { .. }));
 
         std::fs::remove_file(&path).ok();

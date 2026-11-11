@@ -47,6 +47,7 @@ fn mqtt_config(certs: &TestCerts, port: u16) -> MqttConfig {
         qos: 1,
         keep_alive_secs: 30,
         topic_template: "telemetry/{device}".to_string(),
+        ca_cert_pem: std::fs::read(&certs.ca_path).unwrap(),
     }
 }
 

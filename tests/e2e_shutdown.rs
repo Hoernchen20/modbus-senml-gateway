@@ -61,6 +61,7 @@ fn config(server: &MockTcpServer, certs: &TestCerts, broker_port: u16, status: &
             qos: 1,
             keep_alive_secs: 30,
             topic_template: "telemetry/{device}".to_string(),
+            ca_cert_pem: std::fs::read(&certs.ca_path).unwrap(),
         },
         connections: vec![ConnectionConfig {
             id: "tcp-e2e".to_string(),
