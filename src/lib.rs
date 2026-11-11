@@ -53,6 +53,15 @@ pub enum RunError {
 /// its queue and disconnect. Returns an error on MQTT setup failure, or if
 /// the aggregator or publisher dies on its own.
 pub async fn run(config: Config, shutdown: impl Future<Output = ()>) -> Result<(), RunError> {
+    if !config.mqtt.tls {
+        // Allowed for dev setups and isolated networks, but never silently.
+        warn!(
+            broker = %config.mqtt.broker_host,
+            port = config.mqtt.broker_port,
+            "mqtt.tls = false: broker password and telemetry are sent unencrypted"
+        );
+    }
+
     // Everything that can fail up front does so before any task starts.
     let password = read_password(&config.mqtt)?;
     let mqtt_options = build_mqtt_options(&config.mqtt, &config.gateway.id, password)?;

@@ -90,7 +90,9 @@ client_id = "modbus-gateway-router1"
 # Encrypt the broker connection with TLS. Only the CA in ca_cert_path is
 # trusted; the system certificate store is not used. No client certificate
 # is sent.
-# Required. true or false.
+# Required. true or false. With false, the password and all telemetry go
+# over the network in plain text; the gateway logs a warning at startup.
+# Use it only on a trusted, isolated network.
 tls = true
 
 # Path to the PEM file with the CA certificate(s) that signed the broker's
