@@ -5,9 +5,13 @@
 #GATEWAY_CONFIG="/etc/modbus-gateway/config.toml"
 
 # User[:group] to run as. For RTU connections the user needs access to the
-# serial device (usually group `dialout`), and it must be able to write
-# `gateway.status_file_path`.
+# serial device (usually group `dialout`). Running as root works but is not
+# recommended.
 #GATEWAY_USER="modbus-gw:dialout"
+
+# Created at start, owned by GATEWAY_USER. Point `gateway.status_file_path`
+# into it, e.g. "/run/modbus-gateway/status".
+#GATEWAY_STATUS_DIR="/run/modbus-gateway"
 
 # MQTT password, exported under the name given by `mqtt.password_env`.
 supervise_daemon_args="--env MQTT_PASSWORD=changeme"

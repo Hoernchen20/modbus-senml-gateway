@@ -55,14 +55,33 @@ toolchain in a container: `cross build --release --target aarch64-unknown-linux-
 
 ## Install (inside the container)
 
+The service runs as the unprivileged user `modbus-gw` with group
+`dialout` (serial access for RTU). Create it once:
+
+```sh
+adduser -S -D -H -h /nonexistent -s /sbin/nologin -G dialout modbus-gw
+```
+
 ```sh
 install -m 0755 modbus-senml-gateway        /usr/local/bin/
 install -m 0755 openrc/modbus-gateway       /etc/init.d/modbus-gateway
 install -m 0600 openrc/modbus-gateway.confd /etc/conf.d/modbus-gateway
-install -d /etc/modbus-gateway
-install -m 0640 config.toml /etc/modbus-gateway/config.toml
+install -d -m 0755 /etc/modbus-gateway
+install -m 0644 config.toml /etc/modbus-gateway/config.toml
 install -m 0644 ca.pem      /etc/modbus-gateway/ca.pem   # path from mqtt.ca_cert_path
 ```
+
+In the config, set `gateway.status_file_path = "/run/modbus-gateway/status"`.
+The init script creates `/run/modbus-gateway` at each start, owned by
+`modbus-gw` (change it with `GATEWAY_STATUS_DIR` in conf.d).
+
+**Ownership matters.** The gateway trusts its config: it reads the CA file,
+opens the serial device and writes the status file at the paths given
+there. Keep the config, the CA file and the directories holding them owned
+by root and not writable by anyone else (as above). Otherwise whoever can
+edit them can make the gateway trust another CA or write to other files.
+The config holds no secrets (the password lives in conf.d, mode 0600), so
+it can be world-readable.
 
 Edit `/etc/conf.d/modbus-gateway`, then set the MQTT password there. The
 variable name must match `mqtt.password_env` in the config:
@@ -118,7 +137,7 @@ Use the same `/dev/serial/by-id/...` path as `serial_port` in the
 gateway config. The bind mount is taken when the container starts, so
 re-plugging the adapter needs a container restart.
 
-**Permissions**: if the service runs as a non-root user
-(`GATEWAY_USER` in conf.d), that user needs read/write on the device
-node, typically via the `dialout` group, plus write access to the
-directory holding `gateway.status_file_path`.
+**Permissions**: the service user needs read/write on the device node,
+typically via the `dialout` group (the default `GATEWAY_USER` is
+`modbus-gw:dialout`). Check the node's group inside the container with
+`ls -l /dev/serial/by-id/`.

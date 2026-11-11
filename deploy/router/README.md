@@ -87,6 +87,11 @@ The router runs `/etc/start.sh` when the container boots. The script:
    router provides it). The gateway logs directly to `/dev/log`.
 3. starts `/usr/local/sbin/run-gateway` in the background and returns.
 
+The gateway runs as root here, unlike the OpenRC service. `mknod` needs
+root, and the read-only rootfs plus the router's own config upload leave
+little for a separate user to protect. The config and CA files under
+`/dev/container_config/files` are managed by the router.
+
 `start.sh` must terminate. The router documentation says the container is
 otherwise not reachable. Anything added to it has to be started in the
 background (`&`) or be a self-daemonizing command.

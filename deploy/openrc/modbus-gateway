@@ -18,7 +18,14 @@ respawn_max="${respawn_max:-0}"
 
 command="$GATEWAY_BIN"
 command_args="$GATEWAY_CONFIG"
-command_user="${GATEWAY_USER:-root:root}"
+# Unprivileged by default (security review finding 8). The group gives
+# access to serial devices for RTU connections.
+command_user="${GATEWAY_USER:-modbus-gw:dialout}"
+
+# Directory for `gateway.status_file_path`, created at start and owned by
+# the service user. Only that user may write here: the status file is
+# replaced via a temp file in the same directory.
+: "${GATEWAY_STATUS_DIR:=/run/modbus-gateway}"
 
 # The gateway drains queued MQTT sends for ~2s after SIGTERM; give it
 # comfortably longer before escalating.
@@ -40,4 +47,9 @@ start_pre() {
 		eerror "config file $GATEWAY_CONFIG not readable"
 		return 1
 	fi
+	if ! id -u "${command_user%%:*}" >/dev/null 2>&1; then
+		eerror "user ${command_user%%:*} does not exist; create it (see deploy/README.md) or set GATEWAY_USER"
+		return 1
+	fi
+	checkpath --directory --owner "$command_user" --mode 0755 "$GATEWAY_STATUS_DIR"
 }

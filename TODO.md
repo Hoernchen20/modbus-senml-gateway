@@ -42,21 +42,13 @@ Publish a boolean record per device in every aggregation window, e.g.
 
 From `security-review.txt`. Finding numbers refer to that file.
 
-### Nice to have
-
-- **Don't run as root** (finding 8): in the router container probably not
-  practical (`mknod /dev/ttyS1` in `start.sh` needs root; you could drop
-  privileges afterwards). For OpenRC, a dedicated user plus `dialout` would be
-  doable. Document that the config and the paths it points to must be owned by
-  root.
-- **TLS 1.3 only** (finding 14): disable the rustls `tls12` feature if every
-  broker supports 1.3.
-
 ### No action (accepted risk / already fine)
 
 - Finding 12: Modbus has no authentication. This is a design assumption,
   covered by network segmentation.
 - Finding 13: the retained status topic depends on broker ACLs. Note it in the
   deploy docs.
+- Finding 14: TLS 1.2 stays enabled until every broker is known to
+  support 1.3. No revocation checking; documented in design.md §9.
 - Finding 15: the audit ignores are justified. Re-check `.cargo/audit.toml`
   and `.trivyignore.yaml` after every rumqttc/rumqttd bump.
