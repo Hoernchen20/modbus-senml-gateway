@@ -3,6 +3,12 @@
 # CycloneDX SBOM listing every Alpine package and Rust crate in it. To
 # check whether a deployed release is affected by a CVE, look up the
 # package in that release's SBOM, or scan the SBOM with Trivy/Grype.
+#
+# The tag must be annotated: its message becomes the release, the first
+# line as the title and the rest (after a blank line) as the notes, in
+# Markdown. Create it with
+#   git tag -a --cleanup=whitespace -F notes.md vX.Y.Z
+# since git's default cleanup drops lines starting with "#", i.e. headings.
 
 name: Release
 
@@ -29,6 +35,28 @@ jobs:
             echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
             exit 1
           fi
+      # Read from the API rather than the checkout, where actions/checkout
+      # may have turned the annotated tag into a lightweight one; the notes
+      # would then silently be the commit message. Checked before the build
+      # so a missing message fails fast.
+      - name: Read release notes from the tag message
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          type=$(gh api "repos/$GH_REPO/git/ref/tags/$GITHUB_REF_NAME" --jq .object.type)
+          if [ "$type" != tag ]; then
+            echo "::error::$GITHUB_REF_NAME is a lightweight tag. Create it with 'git tag -a', the message is the release notes."
+            exit 1
+          fi
+          sha=$(gh api "repos/$GH_REPO/git/ref/tags/$GITHUB_REF_NAME" --jq .object.sha)
+          gh api "repos/$GH_REPO/git/tags/$sha" --jq .message > "$RUNNER_TEMP/tag-message.txt"
+          head -n 1 "$RUNNER_TEMP/tag-message.txt" > "$RUNNER_TEMP/release-title.txt"
+          tail -n +3 "$RUNNER_TEMP/tag-message.txt" > "$RUNNER_TEMP/release-notes.md"
+          if [ ! -s "$RUNNER_TEMP/release-notes.md" ]; then
+            echo "::error::The message of $GITHUB_REF_NAME has no release notes after its first line."
+            exit 1
+          fi
       - run: deploy/router/build.sh
       - run: mkdir rootfs && tar xzf dist/alpine-rootfs.tgz -C rootfs
       - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -43,5 +71,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes \
+          gh release create "$GITHUB_REF_NAME" --verify-tag \
+            --title "$(cat "$RUNNER_TEMP/release-title.txt")" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
             dist/alpine-rootfs.tgz dist/sbom.cdx.json dist/SHA256SUMS

@@ -175,7 +175,12 @@ accepted advisories are listed with reasons in
 [.cargo/audit.toml](.cargo/audit.toml) and
 [.trivyignore.yaml](.trivyignore.yaml).
 
-Pushing a tag `vX.Y.Z` (matching `Cargo.toml`) publishes a GitHub release
+Pushing an annotated tag `vX.Y.Z` (matching `Cargo.toml`) publishes a
+GitHub release. The tag message is the release: its first line becomes the
+title, the rest (after a blank line) the release notes, in Markdown.
+Create it with `git tag -a --cleanup=whitespace -F notes.md vX.Y.Z`;
+without `--cleanup=whitespace`, git drops lines starting with `#`, so
+Markdown headings would go missing. The release comes
 with the rootfs and a CycloneDX SBOM (`sbom.cdx.json`) listing every
 Alpine package and crate with its version. To check whether a release is
 affected by a CVE, search its SBOM or scan it:
