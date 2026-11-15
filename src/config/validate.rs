@@ -60,6 +60,11 @@ pub enum ValidationError {
         reason: &'static str,
     },
 
+    #[error(
+        "device '{device}': telemetry topic {topic:?} is the gateway's retained status topic"
+    )]
+    TopicCollidesWithStatus { device: String, topic: String },
+
     #[error("duplicate {kind} id '{id}'")]
     DuplicateId { kind: &'static str, id: String },
 
@@ -321,6 +326,15 @@ pub fn validate(config: &Config) -> Result<(), ValidationError> {
                 return Err(ValidationError::DuplicateId {
                     kind: "device",
                     id: device.id.clone(),
+                });
+            }
+            // E.g. template "telemetry/<gateway.id>/{device}" with a device
+            // named "status": packs would land on the online/offline topic.
+            let topic = crate::mqtt::batch_topic(&mqtt.topic_template, &device.id);
+            if topic == crate::mqtt::status_topic(&gw.id) {
+                return Err(ValidationError::TopicCollidesWithStatus {
+                    device: device.id.clone(),
+                    topic,
                 });
             }
 
@@ -726,6 +740,19 @@ mod tests {
                 "{template:?} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn telemetry_topic_must_not_be_the_status_topic() {
+        let mut config = valid_config();
+        config.mqtt.topic_template = "telemetry/gw-test/{device}".to_string();
+        validate(&config).expect("per-gateway template must pass");
+
+        config.connections[0].devices[0].id = "status".to_string();
+        assert!(matches!(
+            validate(&config),
+            Err(ValidationError::TopicCollidesWithStatus { .. })
+        ));
     }
 
     #[test]

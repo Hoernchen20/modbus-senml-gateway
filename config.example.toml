@@ -127,7 +127,7 @@ keep_alive_secs = 30
 # Topic each device's SenML pack is published to. "{device}" is replaced by
 # the device id. One message per device per aggregation window.
 # Required. Must contain "{device}" exactly once and no MQTT wildcards
-# "+" or "#" (checked).
+# "+" or "#", and no device may end up on the status topic (checked).
 topic_template = "telemetry/{device}"
 
 # =============================================================================
