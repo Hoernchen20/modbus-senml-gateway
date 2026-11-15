@@ -172,6 +172,10 @@ pub struct PointConfig {
     #[serde(default)]
     pub absolute: bool,
     pub unit: String,
+    /// Decimal places the window mean is rounded to before publishing.
+    /// `None` publishes the mean unrounded.
+    #[serde(default)]
+    pub decimals: Option<u8>,
 }
 
 fn default_scale() -> f64 {
@@ -270,6 +274,7 @@ io_timeout_ms = 1000
       data_type = "u32"
       scale = 0.001
       unit = "kWh"
+      decimals = 3
 
 [[connection]]
 id = "rs485-bus1"
@@ -345,6 +350,8 @@ inter_frame_delay_ms = 10
             Transport::Rtu { .. } => panic!("expected tcp transport"),
         }
         assert!(tcp.devices[0].blocks[0].points[2].absolute);
+        assert_eq!(tcp.devices[0].blocks[0].points[0].decimals, None);
+        assert_eq!(tcp.devices[0].blocks[1].points[0].decimals, Some(3));
         assert_eq!(tcp.devices[0].blocks[1].word_order, WordOrder::BigEndian);
 
         let rtu = &config.connections[1];
@@ -421,6 +428,7 @@ serial_port = "/dev/ttyUSB0"
             ("unit_id = 1", "unitid = 2", "unitid"),
             ("count = 8", "word_ordr = \"little_endian\"", "word_ordr"),
             ("name = \"voltage_l1\"", "scael = 0.1", "scael"),
+            ("name = \"voltage_l1\"", "decimal = 1", "decimal"),
         ];
         for (anchor, line, key) in cases {
             assert_unknown_key_rejected(anchor, line, key);

@@ -61,6 +61,7 @@ mod tests {
             scale,
             absolute,
             unit: "unit".to_string(),
+            decimals: None,
         }
     }
 

@@ -1,20 +1,5 @@
 # TODO
 
-## Configurable rounding per point
-
-Published values carry float noise, e.g. `228.49199981689452`, which makes the
-SenML messages longer than they need to be.
-
-Add an optional setting to `[[connection.device.block.point]]` for the number
-of decimal places, e.g. `decimals = 1`. Without it, values stay unrounded as
-they are today.
-
-- Round the final aggregated value just before publishing, so rounding errors
-  don't feed into the aggregation.
-- A rounded value can still print long, because some decimals have no exact
-  binary form. Check that the JSON output comes out short.
-- Document the setting in `config.example.toml`.
-
 ## Device connection status in the SenML uplink
 
 Right now a device that can't be read sends no pack at all. On the receiving

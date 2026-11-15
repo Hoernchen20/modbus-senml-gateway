@@ -15,6 +15,9 @@ const MAX_BACKOFF_SECS: u64 = 3_600;
 const MAX_STATUS_SECS: u64 = 3_600;
 /// rumqttc truncates keep-alive to u16 (`65536` would become `0`).
 const MAX_KEEP_ALIVE_SECS: u64 = u16::MAX as u64;
+/// An f64 holds 15-17 significant digits, so more decimal places can't
+/// shorten anything; the cap also keeps `10^decimals` an exact f64.
+pub const MAX_DECIMALS: u8 = 15;
 
 /// IDs end up in MQTT topics, SenML names, syslog lines and the status
 /// file, so they are limited to a charset that is safe in all of them.
@@ -354,6 +357,14 @@ pub fn validate(config: &Config) -> Result<(), ValidationError> {
                         scale: point.scale,
                     });
                 }
+                if let Some(decimals) = point.decimals {
+                    check_range(
+                        format!("device '{}' point '{}': decimals", device.id, point.name),
+                        decimals.into(),
+                        0,
+                        MAX_DECIMALS.into(),
+                    )?;
+                }
             }
 
             if !seen_unit_ids.insert(device.unit_id) {
@@ -491,6 +502,7 @@ mod tests {
             scale: 1.0,
             absolute: false,
             unit: "V".to_string(),
+            decimals: None,
         }
     }
 
@@ -673,6 +685,15 @@ mod tests {
                 ),
                 "scale = {scale}"
             );
+        }
+    }
+
+    #[test]
+    fn decimals_above_max_are_rejected() {
+        for (decimals, ok) in [(0, true), (MAX_DECIMALS, true), (MAX_DECIMALS + 1, false)] {
+            let mut config = valid_config();
+            config.connections[0].devices[0].blocks[0].points[0].decimals = Some(decimals);
+            assert_eq!(validate(&config).is_ok(), ok, "decimals = {decimals}");
         }
     }
 

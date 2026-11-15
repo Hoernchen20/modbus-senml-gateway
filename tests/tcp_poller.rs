@@ -150,6 +150,7 @@ async fn non_finite_values_are_dropped_but_device_stays_ok() {
         scale: 1.0,
         absolute: false,
         unit: "V".to_string(),
+        decimals: None,
     };
     let meter = DeviceConfig {
         id: "meter1".to_string(),

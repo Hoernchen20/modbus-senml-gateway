@@ -36,6 +36,7 @@ pub fn block(function: Function, start: u16, point: &str) -> BlockConfig {
             scale: 1.0,
             absolute: false,
             unit: "V".to_string(),
+            decimals: None,
         }],
     }
 }

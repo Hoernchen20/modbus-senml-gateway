@@ -15,6 +15,8 @@ pub struct PointAgg {
     pub min: f64,
     pub max: f64,
     pub unit: String,
+    /// From `point.decimals`; applied to the mean in `flush` only.
+    pub decimals: Option<u8>,
 }
 
 impl PointAgg {
@@ -25,6 +27,7 @@ impl PointAgg {
             min: f64::INFINITY,
             max: f64::NEG_INFINITY,
             unit,
+            decimals: None,
         }
     }
 
@@ -50,7 +53,10 @@ pub fn init_from_config(config: &Config) -> HashMap<PointId, PointAgg> {
                             device: device.id.clone(),
                             point: point.name.clone(),
                         },
-                        PointAgg::new(point.unit.clone()),
+                        PointAgg {
+                            decimals: point.decimals,
+                            ..PointAgg::new(point.unit.clone())
+                        },
                     );
                 }
             }
@@ -139,7 +145,10 @@ fn flush(
         if point_agg.count == 0 {
             warn!(device = %point_id.device, point = %point_id.point, "no samples in window, dropping point");
         } else {
-            let mean = point_agg.sum / point_agg.count as f64;
+            let mut mean = point_agg.sum / point_agg.count as f64;
+            if let Some(decimals) = point_agg.decimals {
+                mean = round_to_decimals(mean, decimals);
+            }
             by_device
                 .entry(point_id.device.clone())
                 .or_default()
@@ -161,6 +170,23 @@ fn flush(
             points,
         })
         .collect()
+}
+
+/// Rounds half away from zero. `(v * 10^d).round() / 10^d` is the f64
+/// closest to the decimal result, and serde_json prints the shortest string
+/// that round-trips, so `228.49199981689452` with 1 decimal comes out as
+/// `228.5`, not `228.50000000000003`.
+fn round_to_decimals(value: f64, decimals: u8) -> f64 {
+    let factor = 10f64.powi(decimals.into());
+    let scaled = value * factor;
+    // From 2^52 on, every f64 is already a whole number, so there's nothing
+    // to round and dividing back could only add error. Also catches inf.
+    if scaled.abs() >= 4_503_599_627_370_496.0 {
+        return value;
+    }
+    // `+ 0.0` turns -0.0 (e.g. -0.04 at 1 decimal) into 0.0, so it isn't
+    // published as "-0.0".
+    (scaled.round() / factor) + 0.0
 }
 
 #[cfg(test)]
@@ -290,6 +316,76 @@ mod tests {
         // Reset: a second flush with no new readings drops the point.
         let batches = flush(&mut agg, 60, 120);
         assert!(batches.is_empty());
+    }
+
+    #[test]
+    fn round_to_decimals_cases() {
+        assert_eq!(round_to_decimals(228.49199981689452, 1), 228.5);
+        assert_eq!(round_to_decimals(228.49199981689452, 0), 228.0);
+        assert_eq!(round_to_decimals(4.8249, 2), 4.82);
+        assert_eq!(round_to_decimals(-1.25, 1), -1.3);
+        assert_eq!(round_to_decimals(18452.3114999, 3), 18452.311);
+        let neg_zero = round_to_decimals(-0.04, 1);
+        assert!(neg_zero == 0.0 && neg_zero.is_sign_positive());
+        // Too large to have fractional digits at this scale: left as is.
+        assert_eq!(round_to_decimals(1e300, 15), 1e300);
+        assert_eq!(round_to_decimals(f64::MAX, 2), f64::MAX);
+    }
+
+    #[test]
+    fn rounded_values_serialize_short() {
+        // Every 0.001 step in a typical range must print with no more
+        // digits than requested, e.g. never "0.30000000000000004".
+        for i in -20_000..20_000 {
+            let raw = i as f64 * 0.001 + 1e-7;
+            let s = serde_json::to_string(&round_to_decimals(raw, 3)).unwrap();
+            let frac = s.split_once('.').map_or(0, |(_, f)| f.len());
+            assert!(frac <= 3, "{raw} -> {s}");
+        }
+        assert_eq!(
+            serde_json::to_string(&round_to_decimals(228.49199981689452, 1)).unwrap(),
+            "228.5"
+        );
+    }
+
+    #[test]
+    fn flush_rounds_the_mean_not_the_samples() {
+        let mut agg = HashMap::from([(
+            point_id("d1", "p1"),
+            PointAgg {
+                decimals: Some(0),
+                ..PointAgg::new("V".to_string())
+            },
+        )]);
+        // Rounding each sample would give mean(0, 0, 1) = 0.33; rounding
+        // the mean of the raw samples gives round(0.5) = 1.
+        for value in [0.4, 0.4, 0.7] {
+            record(
+                &mut agg,
+                Reading {
+                    point_id: point_id("d1", "p1"),
+                    value,
+                },
+            );
+        }
+
+        let batches = flush(&mut agg, 0, 60);
+        assert_eq!(batches[0].points[0].mean, 1.0);
+    }
+
+    #[test]
+    fn flush_without_decimals_leaves_mean_unrounded() {
+        let mut agg = HashMap::from([(point_id("d1", "p1"), PointAgg::new("V".to_string()))]);
+        record(
+            &mut agg,
+            Reading {
+                point_id: point_id("d1", "p1"),
+                value: 228.49199981689452,
+            },
+        );
+
+        let batches = flush(&mut agg, 0, 60);
+        assert_eq!(batches[0].points[0].mean, 228.49199981689452);
     }
 
     #[test]
