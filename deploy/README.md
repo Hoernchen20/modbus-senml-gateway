@@ -107,6 +107,52 @@ to stderr in the meantime (captured only if `error_log` is set in conf.d).
 Connectivity summary is in the file at
 `gateway.status_file_path`.
 
+## Broker setup
+
+The gateway does not protect its topics on its own; the broker has to.
+Any client allowed to publish to `telemetry/<gateway.id>/status` can
+overwrite the retained `online`/`offline` message (it is also the Last
+Will), and any client allowed to publish to a gateway's telemetry topics
+can inject SenML packs.
+
+- **Give every gateway its own username and password.** Set
+  `mqtt.username` and `mqtt.client_id` per gateway, e.g. both equal to
+  `gateway.id`. A shared login means one leaked password affects all
+  gateways, and a second client with the same client ID disconnects the
+  first.
+- **Put the gateway ID in the telemetry topic** so an ACL can tell
+  gateways apart. The default `topic_template = "telemetry/{device}"`
+  puts every gateway's devices in one namespace; use e.g.
+  `topic_template = "telemetry/gw-router1/{device}"` instead. (The config
+  is rejected if a device would end up on the status topic, e.g. a device
+  named `status`.)
+- **Allow each gateway to write only below its own prefix**, and give
+  consumers read-only access.
+
+Mosquitto example (`acl_file` in `mosquitto.conf`), assuming
+username = `gateway.id`:
+
+```
+# Gateways: write only telemetry/<own username>/...
+pattern write telemetry/%u/#
+
+# Ingest service: read everything, write nothing
+user ingest
+topic read telemetry/#
+```
+
+Check it from another login: a publish to `telemetry/gw-router1/status`
+must be denied (Mosquitto drops it silently, so subscribe and check that
+the retained message did not change).
+
+## Modbus network
+
+Modbus TCP and RTU have no authentication or encryption. Anyone who can
+reach a device's TCP port or the RS-485 bus can change readings, spoof
+devices or cause timeouts. Put Modbus devices on a separate network
+segment (VLAN or firewall rules) that only the gateway can reach, and keep
+the serial bus physically protected.
+
 ## Serial port passthrough (RTU only)
 
 The container needs the host's serial device node, and the config should

@@ -128,6 +128,8 @@ keep_alive_secs = 30
 # the device id. One message per device per aggregation window.
 # Required. Must contain "{device}" exactly once and no MQTT wildcards
 # "+" or "#", and no device may end up on the status topic (checked).
+# To restrict each gateway to its own topics with broker ACLs, include the
+# gateway id, e.g. "telemetry/gw-router1/{device}" (see deploy/README.md).
 topic_template = "telemetry/{device}"
 
 # =============================================================================

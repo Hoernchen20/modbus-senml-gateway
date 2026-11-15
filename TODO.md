@@ -42,13 +42,5 @@ Publish a boolean record per device in every aggregation window, e.g.
 
 From `security-review.txt`. Finding numbers refer to that file.
 
-### No action (accepted risk / already fine)
-
-- Finding 12: Modbus has no authentication. This is a design assumption,
-  covered by network segmentation.
-- Finding 13: the retained status topic depends on broker ACLs. Note it in the
-  deploy docs.
-- Finding 14: TLS 1.2 stays enabled until every broker is known to
-  support 1.3. No revocation checking; documented in design.md §9.
 - Finding 15: the audit ignores are justified. Re-check `.cargo/audit.toml`
   and `.trivyignore.yaml` after every rumqttc/rumqttd bump.
