@@ -93,7 +93,8 @@ For each device, once per window, a SenML pack is published to
 ```json
 [
   { "bn": "urn:dev:gw-router1:meter1:", "bt": 1758447120,
-    "n": "voltage_l1", "u": "V", "v": 231.4 },
+    "n": "online", "vb": true },
+  { "n": "voltage_l1", "u": "V", "v": 231.4 },
   { "n": "current_l1", "u": "A", "v": 4.82 },
   { "n": "active_power", "u": "W", "v": 1112.6 },
   { "n": "energy_total", "u": "kWh", "v": 18452.311 }
@@ -102,7 +103,15 @@ For each device, once per window, a SenML pack is published to
 
 - `bn` = `gateway.base_name_prefix` + device id + `:`
 - `bt` = start of the averaging window (Unix seconds)
-- `n` / `u` / `v` = point name, unit and mean value
+- `online` = `true` if the device was read without errors at least once in
+  the window. `false` on timeouts, Modbus exceptions, protocol errors or a
+  down connection. A device that can't be read still gets a pack every
+  window, holding only the `online: false` record. So on the receiving
+  side, `online: false` means a device or bus problem, and no pack at all
+  means a router, network or MQTT problem. (Exception: in the first, partial
+  window after startup, a device that wasn't read yet sends nothing.)
+- `n` / `u` / `v` = point name, unit and mean value. Every point has its own
+  `u`; there is no `bu`.
 
 ### Online/offline status
 

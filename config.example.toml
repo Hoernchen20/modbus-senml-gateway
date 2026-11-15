@@ -223,7 +223,8 @@ reconnect_backoff_max_secs = 30
       [[connection.device.block.point]]
 
       # Measurement name, published as SenML "n".
-      # Required. An ID, unique within the device (checked).
+      # Required. An ID, unique within the device (checked). "online" is
+      # reserved for the device status record each pack starts with (checked).
       name = "voltage_l1"
 
       # Position of the value inside the block, counted in registers from

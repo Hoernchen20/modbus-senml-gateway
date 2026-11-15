@@ -56,6 +56,7 @@ fn batch(device: &str, mean: f64) -> AggregatedBatch {
         device_id: device.to_string(),
         window_start: 1758447120,
         window_end: 1758447180,
+        online: true,
         points: vec![
             AggregatedPoint {
                 name: "voltage_l1".to_string(),

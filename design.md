@@ -455,6 +455,7 @@ arms are a detail).
 
 A dead/offline device just shows up as `count == 0` for its points at the
 next aggregator flush (§7) — a real, visible gap, not synthesized data.
+Its pack still goes out, with `online = false` (§8).
 
 ### 6.2 Supervisor
 
@@ -505,23 +506,43 @@ async fn run_aggregator(mut rx: mpsc::Receiver<Reading>, publish_tx: mpsc::Sende
 a tick fires slightly late. Points with `count == 0` at flush are dropped
 from the batch (logged as warning), never fabricated as zero/repeated.
 
+Every configured device still gets a batch every window, carrying
+`online`: `true` if the poller sent at least one `PollerMsg::DeviceOk` for
+it in the window. The poller sends that on the same reading channel, from
+the same per-tick result that becomes `StatusEvent::DeviceOk` (§11.2), so
+the uplink and the status file agree. Timeouts, exceptions, protocol errors
+and a down connection all leave it `false`. A device left with no points
+gets a status-only batch. Exception: in the first window after startup,
+which is partial, a device with neither a `DeviceOk` nor any points gets no
+batch, since it may simply not have been polled yet.
+
 ## 8. SenML encoder
 
 Pure function. **v1 decision: one pack per device**, matching one
 MQTT publish per device per window — this is why `topic_template` in
 §4.1 has no `{point}` placeholder.
 
+- First record: `{"n": "online", "vb": true|false}`, the device's
+  connection status for the window (§7). It carries `bn` and `bt`, so a
+  device with no samples still gets a valid pack of just this record.
+  `online` is reserved: no point may use that name (checked).
 - `bn` = `base_name_prefix` + `device.id` + `":"`.
 - `bt` = `window_start` (unix seconds), set once on the first record.
-- `bu`, optional, only when most points in the pack share a unit.
+- No `bu`: a record without `u` inherits `bu` (RFC 8428 §4.3), which would
+  give `online` a unit. Every point carries its own `u` anyway.
 - `n` / `u` / `v` per point.
+- Downstream: a pack with `online = false` means a device or bus problem;
+  no pack at all means a router, network or MQTT problem.
+- Possible extension: the share of successful polls (`0.0`–`1.0`) instead
+  of a bool, to catch flaky devices. Not needed for now.
 - **v1 decision: no `_min`/`_max`/`_sample_count` extension fields** —
   spec-pure, smaller payload. Revisit if a consumer needs them.
 
 ```json
 [
-  { "bn": "urn:dev:gw-router1:meter1:", "bt": 1758447120, "bu": "V",
-    "n": "voltage_l1", "u": "V", "v": 231.4 },
+  { "bn": "urn:dev:gw-router1:meter1:", "bt": 1758447120,
+    "n": "online", "vb": true },
+  { "n": "voltage_l1", "u": "V", "v": 231.4 },
   { "n": "current_l1", "u": "A", "v": 4.82 },
   { "n": "active_power", "u": "W", "v": 1112.6 },
   { "n": "energy_total", "u": "kWh", "v": 18452.311 }
@@ -688,7 +709,9 @@ connection omits the device rollup entirely (`connection rs485-bus1: down`).
   positive, and `absolute = false` leaving a negative value untouched).
 - **Unit — aggregator**: window boundary alignment/drift-freeness, a
   point with `count == 0` dropped (not zeroed) at flush, concurrent
-  readings across multiple devices don't cross-contaminate `PointId`s.
+  readings across multiple devices don't cross-contaminate `PointId`s,
+  `online` set by `DeviceOk` and reset every window, status-only batches
+  for unread devices (but not in the first, partial window).
 - **Unit — config validation**: overlapping points, `start + count > 125`,
   duplicate `unit_id` on one connection, duplicate `serial_port` across
   connections, `tcp`/`rtu` field-set mismatches (covered for free by the

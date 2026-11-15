@@ -12,7 +12,7 @@ use tracing::{info, warn};
 use crate::config::schema::{BlockConfig, ConnectionConfig, Function, Parity, Transport};
 use crate::modbus::decode::decode;
 use crate::status::{StatusEvent, StatusReporter};
-use crate::types::{PointId, Reading};
+use crate::types::{PointId, PollerMsg, Reading};
 
 /// Exponential reconnect backoff, doubling from `min` up to `max`.
 #[derive(Debug)]
@@ -181,10 +181,12 @@ fn inter_frame_delay(transport: &Transport) -> Option<Duration> {
 
 /// One task per `[[connection]]` (§6). Returns only once the aggregator side
 /// of `tx` is closed; otherwise reconnects forever. Connection state and
-/// every device's result on every tick go to `status` (§11.2).
+/// every device's result on every tick go to `status` (§11.2); a clean
+/// result also goes to `tx` as `PollerMsg::DeviceOk`, for the uplink's
+/// `online` record (§8).
 pub async fn run_connection(
     cfg: ConnectionConfig,
-    tx: mpsc::Sender<Reading>,
+    tx: mpsc::Sender<PollerMsg>,
     status: StatusReporter,
 ) {
     let io_timeout = Duration::from_millis(cfg.io_timeout_ms);
@@ -255,7 +257,7 @@ pub async fn run_connection(
                                 if non_finite.remove(&point_id) {
                                     info!(connection = %cfg.id, device = %device.id, point = %point_id.point, "value finite again");
                                 }
-                                let reading = Reading { point_id, value };
+                                let reading = PollerMsg::Reading(Reading { point_id, value });
                                 match tx.try_send(reading) {
                                     Ok(()) => {}
                                     Err(mpsc::error::TrySendError::Full(_)) => {
@@ -292,6 +294,19 @@ pub async fn run_connection(
                             });
                             break 'poll;
                         }
+                    }
+                }
+                if problem.is_none() {
+                    let ok = PollerMsg::DeviceOk {
+                        device_id: device.id.clone(),
+                    };
+                    match tx.try_send(ok) {
+                        Ok(()) => {}
+                        // Only one clean tick per window has to get through.
+                        Err(mpsc::error::TrySendError::Full(_)) => {
+                            warn!(connection = %cfg.id, device = %device.id, "aggregator channel full, dropping device status");
+                        }
+                        Err(mpsc::error::TrySendError::Closed(_)) => return,
                     }
                 }
                 // Reported every tick, not just on change, so an event dropped

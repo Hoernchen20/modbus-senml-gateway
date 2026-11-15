@@ -1,8 +1,10 @@
-use std::collections::HashMap;
-
 use serde::Serialize;
 
-use crate::types::{AggregatedBatch, AggregatedPoint};
+use crate::types::AggregatedBatch;
+
+/// SenML record name of the per-device connection status (§8). Reserved:
+/// config validation rejects a point with this name.
+pub const ONLINE_RECORD: &str = "online";
 
 #[derive(Serialize)]
 struct SenmlRecord {
@@ -10,54 +12,48 @@ struct SenmlRecord {
     base_name: Option<String>,
     #[serde(rename = "bt", skip_serializing_if = "Option::is_none")]
     base_time: Option<u64>,
-    #[serde(rename = "bu", skip_serializing_if = "Option::is_none")]
-    base_unit: Option<String>,
     n: String,
-    u: String,
-    v: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    u: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    v: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vb: Option<bool>,
 }
 
 /// One SenML pack per device (§8). `base_name_prefix` comes from
 /// `gateway.base_name_prefix`; the pack's `bn` is `{base_name_prefix}{device_id}:`.
+///
+/// The first record is always `{"n": "online", "vb": ...}` and carries `bn`
+/// and `bt`, so a device with no samples still gets a valid pack. There is
+/// no `bu`: a record without `u` inherits `bu` (RFC 8428 §4.3), which would
+/// give the boolean a unit, and every point carries its own `u` anyway.
 pub fn encode_senml(batch: &AggregatedBatch, base_name_prefix: &str) -> Vec<u8> {
-    let base_unit = majority_unit(&batch.points);
-
-    let records: Vec<SenmlRecord> = batch
-        .points
-        .iter()
-        .enumerate()
-        .map(|(i, p)| SenmlRecord {
-            base_name: (i == 0).then(|| format!("{base_name_prefix}{}:", batch.device_id)),
-            base_time: (i == 0).then_some(batch.window_start),
-            base_unit: (i == 0).then(|| base_unit.clone()).flatten(),
-            n: p.name.clone(),
-            u: p.unit.clone(),
-            v: p.mean,
-        })
-        .collect();
+    let status = SenmlRecord {
+        base_name: Some(format!("{base_name_prefix}{}:", batch.device_id)),
+        base_time: Some(batch.window_start),
+        n: ONLINE_RECORD.to_string(),
+        u: None,
+        v: None,
+        vb: Some(batch.online),
+    };
+    let points = batch.points.iter().map(|p| SenmlRecord {
+        base_name: None,
+        base_time: None,
+        n: p.name.clone(),
+        u: Some(p.unit.clone()),
+        v: Some(p.mean),
+        vb: None,
+    });
+    let records: Vec<SenmlRecord> = std::iter::once(status).chain(points).collect();
 
     serde_json::to_vec(&records).expect("SenML records always serialize")
-}
-
-/// `bu` is only included when a single unit is shared by a strict majority
-/// of the pack's points — every point still carries its own explicit `u`
-/// (§8), so `bu` is an informational default rather than load-bearing, and
-/// this is a conservative reading of "most points... share a unit".
-fn majority_unit(points: &[AggregatedPoint]) -> Option<String> {
-    if points.is_empty() {
-        return None;
-    }
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    for p in points {
-        *counts.entry(p.unit.as_str()).or_insert(0) += 1;
-    }
-    let (unit, count) = counts.into_iter().max_by_key(|&(_, c)| c)?;
-    (count * 2 > points.len()).then(|| unit.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::AggregatedPoint;
 
     fn point(name: &str, unit: &str, mean: f64) -> AggregatedPoint {
         AggregatedPoint {
@@ -72,6 +68,7 @@ mod tests {
             device_id: "meter1".to_string(),
             window_start: 1758447120,
             window_end: 1758447180,
+            online: true,
             points,
         }
     }
@@ -81,62 +78,74 @@ mod tests {
     }
 
     #[test]
-    fn bn_and_bt_appear_only_on_first_record() {
+    fn status_record_comes_first_and_carries_bn_and_bt() {
         let b = batch(vec![
             point("voltage_l1", "V", 231.4),
             point("current_l1", "A", 4.82),
         ]);
         let json = parse(&encode_senml(&b, "urn:dev:gw-router1:"));
 
-        assert_eq!(json[0]["bn"], "urn:dev:gw-router1:meter1:");
-        assert_eq!(json[0]["bt"], 1758447120);
-        assert!(json[1].get("bn").is_none());
-        assert!(json[1].get("bt").is_none());
+        assert_eq!(
+            json[0],
+            serde_json::json!({
+                "bn": "urn:dev:gw-router1:meter1:",
+                "bt": 1758447120,
+                "n": "online",
+                "vb": true,
+            })
+        );
+        for record in json.as_array().unwrap()[1..].iter() {
+            assert!(record.get("bn").is_none());
+            assert!(record.get("bt").is_none());
+            assert!(record.get("vb").is_none());
+        }
     }
 
     #[test]
-    fn every_record_carries_its_own_unit_and_value() {
+    fn every_point_record_carries_its_own_unit_and_value() {
         let b = batch(vec![
             point("voltage_l1", "V", 231.4),
             point("current_l1", "A", 4.82),
         ]);
         let json = parse(&encode_senml(&b, "urn:dev:gw-router1:"));
 
-        assert_eq!(json[0]["n"], "voltage_l1");
-        assert_eq!(json[0]["u"], "V");
-        assert_eq!(json[0]["v"], 231.4);
-        assert_eq!(json[1]["n"], "current_l1");
-        assert_eq!(json[1]["u"], "A");
-        assert_eq!(json[1]["v"], 4.82);
+        assert_eq!(json[1]["n"], "voltage_l1");
+        assert_eq!(json[1]["u"], "V");
+        assert_eq!(json[1]["v"], 231.4);
+        assert_eq!(json[2]["n"], "current_l1");
+        assert_eq!(json[2]["u"], "A");
+        assert_eq!(json[2]["v"], 4.82);
     }
 
     #[test]
-    fn bu_set_when_majority_of_points_share_a_unit() {
+    fn no_bu_even_when_all_points_share_a_unit() {
+        // A `bu` would also apply to the unitless "online" record.
         let b = batch(vec![
             point("temperature", "Cel", 21.0),
             point("temperature2", "Cel", 22.0),
-            point("temperature3", "Cel", 23.0),
-            point("humidity", "%RH", 40.0),
         ]);
         let json = parse(&encode_senml(&b, "urn:dev:gw:"));
-        assert_eq!(json[0]["bu"], "Cel");
+        assert!(json
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r.get("bu").is_none()));
     }
 
     #[test]
-    fn bu_omitted_when_no_unit_has_a_majority() {
-        let b = batch(vec![
-            point("voltage_l1", "V", 231.4),
-            point("current_l1", "A", 4.82),
-            point("active_power", "W", 1112.6),
-            point("energy_total", "kWh", 18452.311),
-        ]);
-        let json = parse(&encode_senml(&b, "urn:dev:gw:"));
-        assert!(json[0].get("bu").is_none());
-    }
-
-    #[test]
-    fn empty_points_encodes_to_empty_array() {
-        let b = batch(vec![]);
-        assert_eq!(encode_senml(&b, "urn:dev:gw:"), b"[]");
+    fn offline_device_without_points_gets_status_only_pack() {
+        let b = AggregatedBatch {
+            online: false,
+            ..batch(vec![])
+        };
+        assert_eq!(
+            parse(&encode_senml(&b, "urn:dev:gw:")),
+            serde_json::json!([{
+                "bn": "urn:dev:gw:meter1:",
+                "bt": 1758447120,
+                "n": "online",
+                "vb": false,
+            }])
+        );
     }
 }

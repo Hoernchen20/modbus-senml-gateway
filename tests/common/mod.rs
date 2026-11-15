@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use modbus_senml_gateway::config::schema::{
     BlockConfig, DataType, DeviceConfig, Function, PointConfig, WordOrder,
 };
-use modbus_senml_gateway::types::Reading;
+use modbus_senml_gateway::types::{PollerMsg, Reading};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -53,13 +53,43 @@ pub fn device(id: &str, unit_id: u8) -> DeviceConfig {
     }
 }
 
-pub async fn collect_for(rx: &mut mpsc::Receiver<Reading>, duration: Duration) -> Vec<Reading> {
-    let mut readings = Vec::new();
+/// Readings received within `duration`; `DeviceOk`s are dropped.
+pub async fn collect_for(rx: &mut mpsc::Receiver<PollerMsg>, duration: Duration) -> Vec<Reading> {
+    collect_msgs_for(rx, duration)
+        .await
+        .into_iter()
+        .filter_map(|msg| match msg {
+            PollerMsg::Reading(r) => Some(r),
+            PollerMsg::DeviceOk { .. } => None,
+        })
+        .collect()
+}
+
+pub async fn collect_msgs_for(
+    rx: &mut mpsc::Receiver<PollerMsg>,
+    duration: Duration,
+) -> Vec<PollerMsg> {
+    let mut msgs = Vec::new();
     let deadline = tokio::time::Instant::now() + duration;
-    while let Ok(Some(r)) = tokio::time::timeout_at(deadline, rx.recv()).await {
-        readings.push(r);
+    while let Ok(Some(msg)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+        msgs.push(msg);
     }
-    readings
+    msgs
+}
+
+/// The next reading within `timeout`, skipping `DeviceOk`s; `None` on timeout.
+pub async fn next_reading(
+    rx: &mut mpsc::Receiver<PollerMsg>,
+    timeout: Duration,
+) -> Option<Reading> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match tokio::time::timeout_at(deadline, rx.recv()).await {
+            Ok(Some(PollerMsg::Reading(r))) => return Some(r),
+            Ok(Some(PollerMsg::DeviceOk { .. })) => continue,
+            Ok(None) | Err(_) => return None,
+        }
+    }
 }
 
 /// `(device, point) -> value` from the given readings; later readings win.

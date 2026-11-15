@@ -3,7 +3,8 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    by_point, collect_for, device, key, register_value, MockTcpServer, ServerMode, UnitBehavior,
+    by_point, collect_for, collect_msgs_for, device, key, next_reading, register_value,
+    MockTcpServer, ServerMode, UnitBehavior,
 };
 use modbus_senml_gateway::config::schema::{
     BlockConfig, ConnectionConfig, DataType, DeviceConfig, Function, PointConfig, Transport,
@@ -11,6 +12,7 @@ use modbus_senml_gateway::config::schema::{
 };
 use modbus_senml_gateway::modbus::poller::run_connection;
 use modbus_senml_gateway::status::{StatusEvent, StatusReporter, STATUS_CHANNEL_CAPACITY};
+use modbus_senml_gateway::types::PollerMsg;
 use tokio::sync::mpsc;
 
 fn connection(server: &MockTcpServer, devices: Vec<DeviceConfig>) -> ConnectionConfig {
@@ -112,7 +114,25 @@ async fn modbus_exception_skips_only_that_device_and_keeps_connection() {
     ));
 
     // Two ticks' worth.
-    let readings = collect_for(&mut rx, Duration::from_millis(1500)).await;
+    let msgs = collect_msgs_for(&mut rx, Duration::from_millis(1500)).await;
+    let ok = PollerMsg::DeviceOk {
+        device_id: "meter2".to_string(),
+    };
+    // The uplink's `online` follows the same per-tick result as the status file.
+    assert_eq!(
+        msgs.iter()
+            .filter(|m| matches!(m, PollerMsg::DeviceOk { .. }))
+            .collect::<Vec<_>>(),
+        [&ok, &ok],
+        "{msgs:?}"
+    );
+    let readings: Vec<_> = msgs
+        .into_iter()
+        .filter_map(|m| match m {
+            PollerMsg::Reading(r) => Some(r),
+            PollerMsg::DeviceOk { .. } => None,
+        })
+        .collect();
 
     assert!(
         readings.iter().all(|r| r.point_id.device == "meter2"),
@@ -258,10 +278,9 @@ async fn socket_close_reconnects_with_capped_backoff_that_resets_after_success()
 
     // Let the server answer again: polling resumes on the next reconnect.
     server.set_mode(ServerMode::Normal);
-    let reading = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+    let reading = next_reading(&mut rx, Duration::from_secs(3))
         .await
-        .expect("polling should resume after reconnect")
-        .unwrap();
+        .expect("polling should resume after reconnect");
     assert_eq!(reading.point_id.device, "meter1");
     let events = drain(&mut status_rx);
     let down = StatusEvent::ConnectionDown {

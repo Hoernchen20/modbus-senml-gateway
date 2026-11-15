@@ -111,6 +111,10 @@ async fn batches_publish_end_to_end_then_shutdown_is_clean_and_bounded() {
     let pack: Value = serde_json::from_slice(&msg.payload).unwrap();
     let records = pack.as_array().expect("SenML pack is an array");
     assert_eq!(records[0]["bn"], format!("{PREFIX}meter1:"));
+    assert_eq!(
+        (&records[0]["n"], &records[0]["vb"]),
+        (&"online".into(), &true.into())
+    );
     let value_of = |name: &str| {
         records
             .iter()

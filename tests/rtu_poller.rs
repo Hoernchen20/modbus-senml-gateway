@@ -3,7 +3,7 @@ mod common;
 use std::time::Duration;
 
 use common::rtu::{BusEvent, MockRtuBus};
-use common::{by_point, collect_for, device, key, register_value, UnitBehavior};
+use common::{by_point, collect_for, device, key, next_reading, register_value, UnitBehavior};
 use modbus_senml_gateway::config::schema::{ConnectionConfig, DeviceConfig, Parity, Transport};
 use modbus_senml_gateway::modbus::poller::{is_transport_fatal, run_connection};
 use modbus_senml_gateway::status::StatusReporter;
@@ -248,10 +248,9 @@ async fn unplugged_adapter_is_reopened_after_replug() {
         StatusReporter::disabled(),
     ));
 
-    let reading = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+    let reading = next_reading(&mut rx, Duration::from_secs(1))
         .await
-        .expect("first reading")
-        .unwrap();
+        .expect("first reading");
     assert_eq!(reading.point_id.device, "sensor1");
     collect_for(&mut rx, Duration::from_millis(200)).await;
 
@@ -265,10 +264,9 @@ async fn unplugged_adapter_is_reopened_after_replug() {
     );
 
     bus.replug();
-    let reading = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+    let reading = next_reading(&mut rx, Duration::from_secs(3))
         .await
-        .expect("polling should resume once the adapter is back (backoff max 2s)")
-        .unwrap();
+        .expect("polling should resume once the adapter is back (backoff max 2s)");
     assert_eq!(reading.point_id.device, "sensor1");
 
     poller.abort();

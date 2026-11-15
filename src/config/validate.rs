@@ -63,13 +63,14 @@ pub enum ValidationError {
         reason: &'static str,
     },
 
-    #[error(
-        "device '{device}': telemetry topic {topic:?} is the gateway's retained status topic"
-    )]
+    #[error("device '{device}': telemetry topic {topic:?} is the gateway's retained status topic")]
     TopicCollidesWithStatus { device: String, topic: String },
 
     #[error("duplicate {kind} id '{id}'")]
     DuplicateId { kind: &'static str, id: String },
+
+    #[error("device '{device}': point name '{point}' is reserved for the device status record")]
+    ReservedPointName { device: String, point: String },
 
     #[error("device '{device}': duplicate point name '{point}'")]
     DuplicatePointName { device: String, point: String },
@@ -344,6 +345,12 @@ pub fn validate(config: &Config) -> Result<(), ValidationError> {
             let mut point_names = HashSet::new();
             for point in device.blocks.iter().flat_map(|b| &b.points) {
                 check_id(format!("device '{}': point.name", device.id), &point.name)?;
+                if point.name == crate::senml::ONLINE_RECORD {
+                    return Err(ValidationError::ReservedPointName {
+                        device: device.id.clone(),
+                        point: point.name.clone(),
+                    });
+                }
                 if !point_names.insert(point.name.as_str()) {
                     return Err(ValidationError::DuplicatePointName {
                         device: device.id.clone(),
@@ -814,6 +821,16 @@ mod tests {
         assert!(matches!(
             validate(&config),
             Err(ValidationError::DuplicatePointName { .. })
+        ));
+    }
+
+    #[test]
+    fn point_named_like_the_status_record_is_rejected() {
+        let mut config = valid_config();
+        config.connections[0].devices[0].blocks[0].points[0].name = "online".to_string();
+        assert!(matches!(
+            validate(&config),
+            Err(ValidationError::ReservedPointName { .. })
         ));
     }
 

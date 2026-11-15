@@ -6,7 +6,7 @@ use tokio::time;
 use tracing::warn;
 
 use crate::config::schema::Config;
-use crate::types::{AggregatedBatch, AggregatedPoint, PointId, Reading};
+use crate::types::{AggregatedBatch, AggregatedPoint, PointId, PollerMsg, Reading};
 
 #[derive(Debug, Clone)]
 pub struct PointAgg {
@@ -39,13 +39,25 @@ impl PointAgg {
     }
 }
 
+/// Everything the aggregator accumulates over one window.
+#[derive(Debug, Clone, Default)]
+pub struct WindowState {
+    pub points: HashMap<PointId, PointAgg>,
+    /// Every configured device, `true` once it had a clean read (a
+    /// `PollerMsg::DeviceOk`) in the current window.
+    pub online: HashMap<String, bool>,
+}
+
 /// Every `(device.id, point.name)` pair gets a zeroed `PointAgg` up front, so
 /// a point with no samples in a window is a detectable, loggable gap rather
-/// than a silent omission (§7).
-pub fn init_from_config(config: &Config) -> HashMap<PointId, PointAgg> {
+/// than a silent omission (§7). Every device is listed too, so one that
+/// can't be read at all still gets an `online = false` pack.
+pub fn init_from_config(config: &Config) -> WindowState {
     let mut agg = HashMap::new();
+    let mut online = HashMap::new();
     for conn in &config.connections {
         for device in &conn.devices {
+            online.insert(device.id.clone(), false);
             for block in &device.blocks {
                 for point in &block.points {
                     agg.insert(
@@ -62,7 +74,10 @@ pub fn init_from_config(config: &Config) -> HashMap<PointId, PointAgg> {
             }
         }
     }
-    agg
+    WindowState {
+        points: agg,
+        online,
+    }
 }
 
 /// Single aggregator task, tumbling window aligned to wall-clock boundaries
@@ -70,9 +85,9 @@ pub fn init_from_config(config: &Config) -> HashMap<PointId, PointAgg> {
 /// (duration since the Unix epoch) — injected rather than sampled internally
 /// so the initial alignment is deterministic in tests.
 pub async fn run_aggregator(
-    mut rx: mpsc::Receiver<Reading>,
+    mut rx: mpsc::Receiver<PollerMsg>,
     publish_tx: mpsc::Sender<AggregatedBatch>,
-    mut agg: HashMap<PointId, PointAgg>,
+    mut state: WindowState,
     window_secs: u64,
     now_unix: Duration,
 ) {
@@ -82,22 +97,36 @@ pub async fn run_aggregator(
     let mut deadline = time::Instant::now() + wait;
     let sleep = time::sleep_until(deadline);
     tokio::pin!(sleep);
+    // The first window starts whenever the gateway did, so a device may not
+    // have been polled in it yet.
+    let mut first_window = true;
 
     loop {
         tokio::select! {
             maybe_reading = rx.recv() => {
                 match maybe_reading {
-                    Some(reading) => record(&mut agg, reading),
+                    Some(PollerMsg::Reading(reading)) => record(&mut state.points, reading),
+                    Some(PollerMsg::DeviceOk { device_id }) => {
+                        if let Some(online) = state.online.get_mut(&device_id) {
+                            *online = true;
+                        }
+                    }
                     None => return,
                 }
             }
             _ = &mut sleep => {
                 let window_start_unix = window_end_unix - window_secs;
-                for batch in flush(&mut agg, window_start_unix, window_end_unix) {
+                for batch in flush(&mut state, window_start_unix, window_end_unix) {
+                    // Not a confirmed failure yet: the poller may not have
+                    // reached this device before the first boundary.
+                    if first_window && !batch.online && batch.points.is_empty() {
+                        continue;
+                    }
                     if publish_tx.send(batch).await.is_err() {
                         return;
                     }
                 }
+                first_window = false;
                 // Advance the schedule by a fixed `window`, not "now + window" —
                 // keeps the boundary drift-free even if this tick fired late.
                 window_end_unix += window_secs;
@@ -132,16 +161,13 @@ fn record(agg: &mut HashMap<PointId, PointAgg>, reading: Reading) {
 
 /// Drains every point's accumulator into per-device batches and resets them
 /// for the next window. A point with `count == 0` is dropped (logged), never
-/// fabricated as zero/repeated; a device left with no surviving points gets
-/// no batch at all rather than an empty one.
-fn flush(
-    agg: &mut HashMap<PointId, PointAgg>,
-    window_start: u64,
-    window_end: u64,
-) -> Vec<AggregatedBatch> {
+/// fabricated as zero/repeated. Every configured device gets a batch, with
+/// `online` from the window's `DeviceOk`s; one left with no surviving
+/// points gets an empty one, published as a status-only pack.
+fn flush(state: &mut WindowState, window_start: u64, window_end: u64) -> Vec<AggregatedBatch> {
     let mut by_device: HashMap<String, Vec<AggregatedPoint>> = HashMap::new();
 
-    for (point_id, point_agg) in agg.iter_mut() {
+    for (point_id, point_agg) in state.points.iter_mut() {
         if point_agg.count == 0 {
             warn!(device = %point_id.device, point = %point_id.point, "no samples in window, dropping point");
         } else {
@@ -161,13 +187,15 @@ fn flush(
         point_agg.reset();
     }
 
-    by_device
-        .into_iter()
-        .map(|(device_id, points)| AggregatedBatch {
-            device_id,
+    state
+        .online
+        .iter_mut()
+        .map(|(device_id, online)| AggregatedBatch {
+            device_id: device_id.clone(),
             window_start,
             window_end,
-            points,
+            online: std::mem::take(online),
+            points: by_device.remove(device_id).unwrap_or_default(),
         })
         .collect()
 }
@@ -197,6 +225,19 @@ mod tests {
         PointId {
             device: device.to_string(),
             point: point.to_string(),
+        }
+    }
+
+    /// Lists every device that has a point, all offline so far.
+    fn state<const N: usize>(points: [(PointId, PointAgg); N]) -> WindowState {
+        let points = HashMap::from(points);
+        let online = points.keys().map(|id| (id.device.clone(), false)).collect();
+        WindowState { points, online }
+    }
+
+    fn device_ok(device: &str) -> PollerMsg {
+        PollerMsg::DeviceOk {
+            device_id: device.to_string(),
         }
     }
 
@@ -270,40 +311,67 @@ mod tests {
     }
 
     #[test]
-    fn flush_drops_zero_count_points_and_omits_empty_device_batches() {
-        let mut agg = HashMap::from([
+    fn flush_drops_zero_count_points_but_keeps_every_device() {
+        let mut agg = state([
             (point_id("d1", "p1"), PointAgg::new("V".to_string())),
             (point_id("d2", "p2"), PointAgg::new("A".to_string())),
         ]);
         // Only d1's point gets a sample; d2's point has zero samples.
         record(
-            &mut agg,
+            &mut agg.points,
             Reading {
                 point_id: point_id("d1", "p1"),
                 value: 42.0,
             },
         );
 
-        let batches = flush(&mut agg, 0, 60);
+        let batches: HashMap<_, _> = flush(&mut agg, 0, 60)
+            .into_iter()
+            .map(|b| (b.device_id.clone(), b))
+            .collect();
 
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].device_id, "d1");
-        assert_eq!(batches[0].points.len(), 1);
-        assert_eq!(batches[0].points[0].mean, 42.0);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches["d1"].points.len(), 1);
+        assert_eq!(batches["d1"].points[0].mean, 42.0);
+        assert!(batches["d2"].points.is_empty());
+    }
+
+    #[test]
+    fn online_is_set_by_device_ok_and_reset_every_window() {
+        let mut agg = state([
+            (point_id("d1", "p1"), PointAgg::new("V".to_string())),
+            (point_id("d2", "p2"), PointAgg::new("A".to_string())),
+        ]);
+        *agg.online.get_mut("d1").unwrap() = true;
+
+        let online = |batches: Vec<AggregatedBatch>| -> HashMap<String, bool> {
+            batches
+                .into_iter()
+                .map(|b| (b.device_id, b.online))
+                .collect()
+        };
+        assert_eq!(
+            online(flush(&mut agg, 0, 60)),
+            HashMap::from([("d1".to_string(), true), ("d2".to_string(), false)])
+        );
+        assert_eq!(
+            online(flush(&mut agg, 60, 120)),
+            HashMap::from([("d1".to_string(), false), ("d2".to_string(), false)])
+        );
     }
 
     #[test]
     fn flush_computes_mean_and_resets_for_next_window() {
-        let mut agg = HashMap::from([(point_id("d1", "p1"), PointAgg::new("V".to_string()))]);
+        let mut agg = state([(point_id("d1", "p1"), PointAgg::new("V".to_string()))]);
         record(
-            &mut agg,
+            &mut agg.points,
             Reading {
                 point_id: point_id("d1", "p1"),
                 value: 10.0,
             },
         );
         record(
-            &mut agg,
+            &mut agg.points,
             Reading {
                 point_id: point_id("d1", "p1"),
                 value: 20.0,
@@ -315,7 +383,7 @@ mod tests {
 
         // Reset: a second flush with no new readings drops the point.
         let batches = flush(&mut agg, 60, 120);
-        assert!(batches.is_empty());
+        assert!(batches[0].points.is_empty());
     }
 
     #[test]
@@ -350,7 +418,7 @@ mod tests {
 
     #[test]
     fn flush_rounds_the_mean_not_the_samples() {
-        let mut agg = HashMap::from([(
+        let mut agg = state([(
             point_id("d1", "p1"),
             PointAgg {
                 decimals: Some(0),
@@ -361,7 +429,7 @@ mod tests {
         // the mean of the raw samples gives round(0.5) = 1.
         for value in [0.4, 0.4, 0.7] {
             record(
-                &mut agg,
+                &mut agg.points,
                 Reading {
                     point_id: point_id("d1", "p1"),
                     value,
@@ -375,9 +443,9 @@ mod tests {
 
     #[test]
     fn flush_without_decimals_leaves_mean_unrounded() {
-        let mut agg = HashMap::from([(point_id("d1", "p1"), PointAgg::new("V".to_string()))]);
+        let mut agg = state([(point_id("d1", "p1"), PointAgg::new("V".to_string()))]);
         record(
-            &mut agg,
+            &mut agg.points,
             Reading {
                 point_id: point_id("d1", "p1"),
                 value: 228.49199981689452,
@@ -390,7 +458,7 @@ mod tests {
 
     #[test]
     fn concurrent_devices_do_not_cross_contaminate() {
-        let mut agg = HashMap::from([
+        let mut agg = state([
             (
                 point_id("d1", "temperature"),
                 PointAgg::new("Cel".to_string()),
@@ -401,14 +469,14 @@ mod tests {
             ),
         ]);
         record(
-            &mut agg,
+            &mut agg.points,
             Reading {
                 point_id: point_id("d1", "temperature"),
                 value: 21.0,
             },
         );
         record(
-            &mut agg,
+            &mut agg.points,
             Reading {
                 point_id: point_id("d2", "temperature"),
                 value: 99.0,
@@ -429,7 +497,7 @@ mod tests {
     async fn window_boundaries_stay_drift_free_across_a_late_tick() {
         let (reading_tx, reading_rx) = mpsc::channel(16);
         let (publish_tx, mut publish_rx) = mpsc::channel(16);
-        let agg = HashMap::from([(point_id("d1", "p1"), PointAgg::new("V".to_string()))]);
+        let agg = state([(point_id("d1", "p1"), PointAgg::new("V".to_string()))]);
         let start = time::Instant::now();
 
         tokio::spawn(run_aggregator(
@@ -446,10 +514,10 @@ mod tests {
         tokio::task::yield_now().await;
 
         reading_tx
-            .send(Reading {
+            .send(PollerMsg::Reading(Reading {
                 point_id: point_id("d1", "p1"),
                 value: 1.0,
-            })
+            }))
             .await
             .unwrap();
 
@@ -458,21 +526,13 @@ mod tests {
         let first = publish_rx.recv().await.unwrap();
         assert_eq!((first.window_start, first.window_end), (0, 60));
 
-        // The second window needs a sample too — an empty window produces no
-        // batch by design (§7), so without it `recv()` would wait forever.
-        reading_tx
-            .send(Reading {
-                point_id: point_id("d1", "p1"),
-                value: 2.0,
-            })
-            .await
-            .unwrap();
-
+        // No sample in the second window: it still gets a (status-only) batch.
         // The next boundary must still be exactly 60s after the first —
         // not shifted by the 30s of lateness in the previous tick.
         time::advance(Duration::from_secs(30)).await;
         let second = publish_rx.recv().await.unwrap();
         assert_eq!((second.window_start, second.window_end), (60, 120));
+        assert!(!second.online && second.points.is_empty());
         // Labels come from a counter, so also check the tick itself fired at
         // start+120s — a "now + window" reschedule would fire at 150s (the
         // paused clock auto-advances to it) and fail here.
@@ -480,10 +540,52 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn first_window_skips_unconfirmed_offline_devices() {
+        let (msg_tx, msg_rx) = mpsc::channel(16);
+        let (publish_tx, mut publish_rx) = mpsc::channel(16);
+        let agg = state([
+            (point_id("d1", "p1"), PointAgg::new("V".to_string())),
+            (point_id("d2", "p2"), PointAgg::new("V".to_string())),
+        ]);
+        tokio::spawn(run_aggregator(
+            msg_rx,
+            publish_tx,
+            agg,
+            60,
+            Duration::from_secs(30),
+        ));
+        tokio::task::yield_now().await;
+
+        // First (partial) window: only d1 is read. d2 might just not have
+        // been polled yet, so it gets no pack.
+        msg_tx.send(device_ok("d1")).await.unwrap();
+        time::advance(Duration::from_secs(30)).await;
+        let first = publish_rx.recv().await.unwrap();
+        assert_eq!((first.device_id.as_str(), first.online), ("d1", true));
+
+        // From the second window on, every device gets a pack.
+        msg_tx.send(device_ok("d2")).await.unwrap();
+        time::advance(Duration::from_secs(60)).await;
+        let mut second: Vec<_> = [
+            publish_rx.recv().await.unwrap(),
+            publish_rx.recv().await.unwrap(),
+        ]
+        .into_iter()
+        .map(|b| (b.device_id, b.online, b.window_start))
+        .collect();
+        second.sort();
+        assert_eq!(
+            second,
+            [("d1".to_string(), false, 60), ("d2".to_string(), true, 60)]
+        );
+        assert!(publish_rx.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn aggregator_stops_when_reading_channel_closes() {
-        let (reading_tx, reading_rx) = mpsc::channel::<Reading>(16);
+        let (reading_tx, reading_rx) = mpsc::channel::<PollerMsg>(16);
         let (publish_tx, _publish_rx) = mpsc::channel(16);
-        let agg = HashMap::new();
+        let agg = WindowState::default();
 
         let handle = tokio::spawn(run_aggregator(
             reading_rx,
