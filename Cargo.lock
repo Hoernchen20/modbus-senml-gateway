@@ -1276,7 +1276,7 @@ dependencies = [
 
 [[package]]
 name = "modbus-senml-gateway"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "nix 0.32.0",
  "rcgen",
