@@ -170,7 +170,10 @@ discards the unfinished averaging window, gives queued MQTT messages about
 ## Security updates
 
 Dependabot opens PRs for crate and GitHub Actions updates. GitHub Actions
-run `cargo audit` daily and scan the router rootfs with Trivy weekly;
+run `cargo audit` daily and scan the router rootfs with Trivy: the
+rootfs of the latest release daily (a failure means a fix is available, so
+build and publish a new release) and a fresh build weekly (a failure
+means a rebuild alone doesn't help, e.g. the Alpine version needs a bump);
 accepted advisories are listed with reasons in
 [.cargo/audit.toml](.cargo/audit.toml) and
 [.trivyignore.yaml](.trivyignore.yaml).

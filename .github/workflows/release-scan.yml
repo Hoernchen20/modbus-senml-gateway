@@ -1,0 +1,70 @@
+# Scans the rootfs of the latest GitHub release with Trivy, i.e. what is
+# actually deployed on routers. Runs daily because Alpine and RustSec
+# publish fixes without any change to this repo; a failed scheduled run is
+# emailed to whoever last changed the cron.
+#
+# A failure means a fix is available that the release doesn't contain:
+# rebuild and publish a new release (if the finding is in a crate, update
+# Cargo.lock first). Rootfs scan, by contrast, checks a fresh build, which
+# already contains every Alpine fix released so far.
+#
+# Same settings as rootfs-scan.yml: only HIGH and CRITICAL vulnerabilities
+# with an available fix fail the run, and .trivyignore.yaml from main
+# applies.
+
+name: Release scan
+
+on:
+  push:
+    branches: [main]
+    paths: [.trivyignore.yaml, .github/workflows/release-scan.yml]
+  schedule:
+    - cron: "29 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trivy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Find latest release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag=$(gh release list --exclude-drafts --exclude-pre-releases \
+            --limit 1 --json tagName --jq '.[0].tagName // empty')
+          if [ -z "$tag" ]; then
+            echo "::notice::No release published yet, nothing to scan."
+          else
+            echo "Scanning release $tag" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Download and verify the release rootfs
+        if: steps.release.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          mkdir release
+          gh release download "$TAG" --dir release \
+            --pattern alpine-rootfs.tgz --pattern SHA256SUMS
+          (cd release && sha256sum -c --ignore-missing --strict SHA256SUMS)
+          mkdir rootfs
+          tar xzf release/alpine-rootfs.tgz -C rootfs
+      - if: steps.release.outputs.tag != ''
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: rootfs
+          scan-ref: rootfs
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          trivyignores: .trivyignore.yaml
